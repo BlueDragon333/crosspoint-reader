@@ -414,6 +414,10 @@ void EpubReaderActivity::startClipSelection() {
     const auto& clipping = std::get<ClippingResult>(result.data);
     const uint16_t startPage = static_cast<uint16_t>(pageNumber + clipping.startPageOffset);
     const uint16_t endPage = static_cast<uint16_t>(pageNumber + clipping.endPageOffset);
+    if (section && currentSpineIndex == spineIndex && endPage < section->pageCount) {
+      section->currentPage = endPage;
+      currentPageVisibleOffset = section->getVisibleTextOffsetForPage(endPage);
+    }
     const uint16_t paragraphIndex =
         section ? section->getParagraphIndexForPage(startPage).value_or(UINT16_MAX) : UINT16_MAX;
     const size_t clippingIndex = CLIPPINGS.clippingCount();
@@ -706,6 +710,13 @@ void EpubReaderActivity::loop() {
   }
 
   if (handleBackNavigation()) {
+    return;
+  }
+
+  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::CREATE_CLIPPING &&
+      mappedInput.wasReleased(MappedInputManager::Button::Power) &&
+      !mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    startClipSelection();
     return;
   }
 

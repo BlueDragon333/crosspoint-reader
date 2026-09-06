@@ -352,13 +352,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
 #if FREEINK_CAP_TOUCH
         SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
                           {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH,
-                           StrId::STR_FOOTNOTES, StrId::STR_CONFIRM},
+                           StrId::STR_FOOTNOTES, StrId::STR_CONFIRM, StrId::STR_SAVE_CLIPPING},
                           "shortPwrBtn", StrId::STR_CAT_CONTROLS),
 #else
-        SettingInfo::Enum(
-            StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
-            {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES},
-            "shortPwrBtn", StrId::STR_CAT_CONTROLS),
+        SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
+                          {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH,
+                           StrId::STR_FOOTNOTES, StrId::STR_SAVE_CLIPPING},
+                          "shortPwrBtn", StrId::STR_CAT_CONTROLS),
 #endif
         // Erased below unless the QMI8658 IMU is present (X3).
         SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
