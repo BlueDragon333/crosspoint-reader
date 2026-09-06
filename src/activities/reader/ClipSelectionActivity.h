@@ -2,6 +2,7 @@
 
 #include <Epub/Page.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -39,7 +40,7 @@ class ClipSelectionActivity final : public Activity {
 
   static constexpr size_t MAX_SELECTABLE_WORDS = 240;
 
-  void extractWords();
+  bool extractWords();
   int closestInRow(uint16_t row, int centerX) const;
   int wordAt(int x, int y) const;
   void moveVertical(int direction);
@@ -55,7 +56,8 @@ class ClipSelectionActivity final : public Activity {
   const int marginTop;
   int fontId = 0;
   int lineHeight = 0;
-  std::vector<WordBox> words;
+  std::unique_ptr<WordBox[]> words;
+  size_t wordCount = 0;
   int selected = 0;
   int rangeStart = -1;
   uint8_t currentPageOffset = 0;
