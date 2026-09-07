@@ -350,11 +350,22 @@ void ClipSelectionActivity::loop() {
 void ClipSelectionActivity::drawSelection() const {
   const int first = rangeStart < 0 ? selected : std::min(rangeStart, selected);
   const int last = rangeStart < 0 ? selected : std::max(rangeStart, selected);
+  const WordBox* previous = nullptr;
   for (int i = first; i <= last; ++i) {
     const WordBox& word = words[i];
     if (word.pageOffset != currentPageOffset) continue;
+    if (previous && previous->row == word.row) {
+      const int previousRight = previous->x + previous->width;
+      const int wordRight = word.x + word.width;
+      if (previousRight < word.x) {
+        renderer.fillRectDither(previousRight, word.y, word.x - previousRight, word.height, Color::LightGray);
+      } else if (wordRight < previous->x) {
+        renderer.fillRectDither(wordRight, word.y, previous->x - wordRight, word.height, Color::LightGray);
+      }
+    }
     renderer.fillRectDither(word.x, word.y, word.width, word.height, Color::LightGray);
     renderer.drawText(fontId, word.x, word.y, word.text, true, word.style);
+    previous = &word;
   }
   const WordBox& cursor = words[selected];
   renderer.drawRect(cursor.x, cursor.y, cursor.width, cursor.height, true);

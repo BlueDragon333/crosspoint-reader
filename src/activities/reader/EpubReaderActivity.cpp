@@ -1946,6 +1946,9 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
     const auto& block = line.getBlock();
     if (!block || !block->valid()) continue;
     bool redrawLine = false;
+    bool hasPreviousHighlight = false;
+    int previousHighlightX = 0;
+    int previousHighlightWidth = 0;
     const int rubyShift = block->getRubyShift(renderer.getFontAscenderSize(fontId));
     for (uint16_t i = 0; i < block->wordCount(); ++i) {
       const char* text = block->wordText(i);
@@ -1954,7 +1957,10 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
       int width = renderer.getTextAdvanceX(fontId, text, style);
       if (width <= 0) continue;
       const uint16_t wordIndex = pageWordIndex++;
-      if (!isHighlighted(wordIndex)) continue;
+      if (!isHighlighted(wordIndex)) {
+        hasPreviousHighlight = false;
+        continue;
+      }
 
       const int skipX = hasEmSpacePrefix(text) ? renderer.getTextAdvanceX(fontId, "\xe2\x80\x83", style) : 0;
       const int x = orientedMarginLeft + line.xPos + block->wordXpos(i) + skipX;
@@ -1964,8 +1970,22 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
         width = std::min(width, static_cast<int>(block->wordXpos(i + 1) - block->wordXpos(i) - skipX));
       }
       if (width > 0) {
+        const int highlightRight = x + width;
+        const int previousHighlightRight = previousHighlightX + previousHighlightWidth;
+        if (hasPreviousHighlight && previousHighlightRight < x) {
+          renderer.fillRectDither(previousHighlightRight, y, x - previousHighlightRight, renderer.getLineHeight(fontId),
+                                  Color::LightGray);
+        } else if (hasPreviousHighlight && highlightRight < previousHighlightX) {
+          renderer.fillRectDither(highlightRight, y, previousHighlightX - highlightRight,
+                                  renderer.getLineHeight(fontId), Color::LightGray);
+        }
         renderer.fillRectDither(x, y, width, renderer.getLineHeight(fontId), Color::LightGray);
+        previousHighlightX = x;
+        previousHighlightWidth = width;
+        hasPreviousHighlight = true;
         redrawLine = true;
+      } else {
+        hasPreviousHighlight = false;
       }
     }
     if (redrawLine) {
