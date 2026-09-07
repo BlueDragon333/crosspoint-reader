@@ -1,5 +1,6 @@
 #include "ClipSelectionActivity.h"
 
+#include <Arduino.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
@@ -20,6 +21,9 @@
 namespace {
 
 constexpr size_t FONT_PREWARM_TEXT_MAX = 2048;
+constexpr int TOUCH_DRAG_MOVEMENT_PX = 4;
+constexpr unsigned long TOUCH_PAGE_ADVANCE_HOLD_MS = 1000;
+constexpr int TOUCH_PAGE_END_DWELL_SLOP_PX = 8;
 
 bool hasVisibleText(const char* text) {
   if (!text) return false;
@@ -212,6 +216,25 @@ int ClipSelectionActivity::wordAt(const int x, const int y) const {
   return -1;
 }
 
+int ClipSelectionActivity::nextPageStartIndexForTouchDrag() const {
+  if (!touchDragHasMoved || rangeStart < 0 || selected < rangeStart) return -1;
+
+  const uint8_t currentPage = words[selected].pageOffset;
+  for (int i = selected + 1; i < static_cast<int>(wordCount); ++i) {
+    if (words[i].pageOffset == currentPage) return -1;
+    return words[i].pageOffset > currentPage ? i : -1;
+  }
+  return -1;
+}
+
+bool ClipSelectionActivity::isWithinCurrentPageEndDwellSlop(const int x, const int y) const {
+  if (selected < 0 || selected >= static_cast<int>(wordCount)) return false;
+  const WordBox& word = words[selected];
+  return word.pageOffset == currentPageOffset && x >= word.x - TOUCH_PAGE_END_DWELL_SLOP_PX &&
+         x < word.x + word.width + TOUCH_PAGE_END_DWELL_SLOP_PX && y >= word.y - TOUCH_PAGE_END_DWELL_SLOP_PX &&
+         y < word.y + word.height + TOUCH_PAGE_END_DWELL_SLOP_PX;
+}
+
 void ClipSelectionActivity::moveVertical(const int direction) {
   const int targetRow = static_cast<int>(words[selected].row) + direction;
   if (targetRow < 0 || targetRow >= rowCount) return;
@@ -296,6 +319,60 @@ bool ClipSelectionActivity::handleHomeGesture() {
 }
 
 void ClipSelectionActivity::loop() {
+  if (wordCount == 0) return;
+
+  int touchX = 0;
+  int touchY = 0;
+  if (touchDragSelecting) {
+    if (mappedInput.isScreenTouchHeld(touchX, touchY)) {
+      const int deltaX = touchX - touchDragStartX;
+      const int deltaY = touchY - touchDragStartY;
+      touchDragHasMoved = touchDragHasMoved || deltaX >= TOUCH_DRAG_MOVEMENT_PX || deltaX <= -TOUCH_DRAG_MOVEMENT_PX ||
+                          deltaY >= TOUCH_DRAG_MOVEMENT_PX || deltaY <= -TOUCH_DRAG_MOVEMENT_PX;
+
+      const int hit = wordAt(touchX, touchY);
+      if (hit >= 0) selectIndex(hit);
+
+      // A drag ends normally when released on the final word. Holding there
+      // for a moment is the explicit request to carry the range onto the
+      // next preloaded page.
+      const int nextPageStart = nextPageStartIndexForTouchDrag();
+      if (nextPageStart >= 0 && (hit >= 0 || isWithinCurrentPageEndDwellSlop(touchX, touchY))) {
+        const unsigned long now = millis();
+        if (touchDragPageEndIndex != selected) {
+          touchDragPageEndIndex = selected;
+          touchDragPageEndHeldSince = now;
+        } else if (now - touchDragPageEndHeldSince >= TOUCH_PAGE_ADVANCE_HOLD_MS) {
+          touchDragPageEndIndex = -1;
+          selectIndex(nextPageStart);
+        }
+      } else {
+        touchDragPageEndIndex = -1;
+      }
+      return;
+    }
+    if (mappedInput.wasScreenTouchReleased()) {
+      touchDragSelecting = false;
+      touchDragHasMoved = false;
+      touchDragPageEndIndex = -1;
+      confirmSelection();
+      return;
+    }
+  } else if (mappedInput.wasScreenTouchDown(touchX, touchY)) {
+    const int hit = wordAt(touchX, touchY);
+    if (hit >= 0) {
+      selectIndex(hit);
+      if (rangeStart < 0) rangeStart = selected;
+      touchDragSelecting = true;
+      touchDragHasMoved = false;
+      touchDragStartX = touchX;
+      touchDragStartY = touchY;
+      touchDragPageEndIndex = -1;
+      requestUpdate();
+      return;
+    }
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     if (rangeStart >= 0) {
       rangeStart = -1;
@@ -305,15 +382,12 @@ void ClipSelectionActivity::loop() {
     }
     return;
   }
-  if (wordCount == 0) return;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     confirmSelection();
     return;
   }
 
-  int touchX = 0;
-  int touchY = 0;
   if (mappedInput.wasScreenTapped(touchX, touchY)) {
     const int hit = wordAt(touchX, touchY);
     if (hit >= 0) {

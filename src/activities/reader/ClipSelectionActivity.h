@@ -43,6 +43,8 @@ class ClipSelectionActivity final : public Activity {
   bool extractWords();
   int closestInRow(uint16_t row, int centerX) const;
   int wordAt(int x, int y) const;
+  int nextPageStartIndexForTouchDrag() const;
+  bool isWithinCurrentPageEndDwellSlop(int x, int y) const;
   void moveVertical(int direction);
   void selectIndex(int index);
   void moveToPage(int pageOffset);
@@ -62,5 +64,11 @@ class ClipSelectionActivity final : public Activity {
   int rangeStart = -1;
   uint8_t currentPageOffset = 0;
   uint16_t rowCount = 0;
+  bool touchDragSelecting = false;
+  bool touchDragHasMoved = false;
+  int touchDragStartX = 0;
+  int touchDragStartY = 0;
+  int touchDragPageEndIndex = -1;
+  unsigned long touchDragPageEndHeldSince = 0;
   ButtonNavigator buttonNavigator;
 };
