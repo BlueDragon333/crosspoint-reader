@@ -64,6 +64,7 @@ class ClippingStore {
   size_t clippingCount() const { return clippings.size(); }
   const Clipping* clippingAt(size_t index) const;
   const std::vector<Clipping>& getClippings() const { return clippings; }
+  bool readClippingPreview(size_t index, std::string& out) const;
   bool readClippingText(size_t index, std::string& out) const;
   bool readClippingText(const Clipping& clipping, std::string& out) const;
 

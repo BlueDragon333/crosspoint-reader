@@ -35,4 +35,5 @@ class EpubReaderClippingListActivity final : public UiListActivity {
   int windowCount = 0;
   OptionPopup confirmPopup;
   bool confirmingDelete = false;
+  bool initialListRender = true;
 };

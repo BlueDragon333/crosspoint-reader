@@ -10,6 +10,7 @@
 #include "ClippingStore.h"
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
+#include "clippings/ClippingPreview.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
@@ -19,30 +20,6 @@ namespace fui = freeink::ui;
 namespace {
 
 constexpr int ENTER_DELETE_MODE_MS = 700;
-constexpr size_t PREVIEW_BYTES = 120;
-
-std::string makePreview(std::string text) {
-  std::string compact;
-  compact.reserve(std::min(text.size(), PREVIEW_BYTES + 4));
-  bool previousWasSpace = false;
-  for (const char c : text) {
-    const bool isSpace = c == ' ' || c == '\n' || c == '\r' || c == '\t';
-    if (isSpace) {
-      if (!compact.empty() && !previousWasSpace) compact.push_back(' ');
-    } else {
-      compact.push_back(c);
-    }
-    previousWasSpace = isSpace;
-    if (compact.size() > PREVIEW_BYTES + 4) break;
-  }
-  if (compact.size() > PREVIEW_BYTES) {
-    size_t end = PREVIEW_BYTES;
-    while (end > 0 && (static_cast<unsigned char>(compact[end]) & 0xC0) == 0x80) --end;
-    compact.resize(end);
-    compact += "...";
-  }
-  return compact;
-}
 
 }  // namespace
 
@@ -51,6 +28,10 @@ EpubReaderClippingListActivity::EpubReaderClippingListActivity(GfxRenderer& rend
 
 void EpubReaderClippingListActivity::onEnter() {
   UiListActivity::onEnter();
+  initialListRender = true;
+  for (auto& preview : previews) {
+    preview.reserve(clippingPreview::MAX_BYTES + clippingPreview::ELLIPSIS_BYTES);
+  }
   rebuildRows();
 }
 
@@ -73,11 +54,10 @@ void EpubReaderClippingListActivity::refreshRowWindow(const int start) {
   for (int slot = 0; slot < windowCount; ++slot) {
     const size_t clippingIndex = static_cast<size_t>(clamped + slot);
     const Clipping* clipping = CLIPPINGS.clippingAt(clippingIndex);
-    std::string text;
-    if (!clipping || !CLIPPINGS.readClippingText(clippingIndex, text)) {
+    previews[slot].clear();
+    if (!clipping || !CLIPPINGS.readClippingPreview(clippingIndex, previews[slot])) {
       LOG_ERR("CLIP", "Failed to read clipping %u", static_cast<unsigned>(clippingIndex));
     }
-    previews[slot] = makePreview(std::move(text));
 
     fui::ListItem item;
     item.label = clipping && clipping->chapterTitle[0] != '\0' ? clipping->chapterTitle : tr(STR_CLIPPINGS);
@@ -203,6 +183,11 @@ void EpubReaderClippingListActivity::buildScreen(UiScreen& screen) {
 }
 
 void EpubReaderClippingListActivity::render(RenderLock&& lock) {
+  if (initialListRender && listCount() > 0) {
+    renderer.clearScreen();
+    GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  }
+  initialListRender = false;
   UiListActivity::render(std::move(lock));
   if (confirmPopup.processRender(renderer, mappedInput)) return;
 }
