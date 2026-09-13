@@ -24,6 +24,7 @@
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"  // list icons for the compare rows
 #include "fontIds.h"
+#include "network/WifiPowerSaveGuard.h"
 #include "util/PluginHttp.h"
 
 namespace fui = freeink::ui;
@@ -140,6 +141,7 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
 }
 
 void KOReaderSyncActivity::performSync() {
+  WifiPowerSaveGuard psGuard;
   const DocumentMatchMethod primaryMethod = KOREADER_STORE.getMatchMethod();
   documentHash = calculateDocumentHashForMethod(epubPath, primaryMethod);
   if (documentHash.empty()) {
@@ -361,7 +363,12 @@ void KOReaderSyncActivity::performUpload() {
   // (consistent with the release-before-sync pattern in performSync); nothing below needs it.
   epub.reset();
 
-  const auto result = KOReaderSyncClient::updateProgress(progress);
+  KOReaderSyncClient::Error result;
+  {
+    // Restore power-save before esp_wifi_stop below; set_ps on a stopped radio fails.
+    WifiPowerSaveGuard psGuard;
+    result = KOReaderSyncClient::updateProgress(progress);
+  }
 
   // Drop the radio while user reads the result; full teardown happens at silent reboot.
   esp_wifi_stop();

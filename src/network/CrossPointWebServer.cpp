@@ -28,6 +28,7 @@
 #include "SettingsList.h"
 #include "WebDAVHandler.h"
 #include "WifiCredentialStore.h"
+#include "WifiPowerSaveGuard.h"
 #include "html/FilesPageHtml.generated.h"
 #include "html/FontsPageHtml.generated.h"
 #include "html/HomePageHtml.generated.h"
@@ -1818,6 +1819,7 @@ void CrossPointWebServer::handleRelay() {
   // releases every client/response allocation before rebuilding these services.
   suspendTransferServices();
   ScopedCleanup resumeServices{[this] { resumeTransferServices(); }};
+  WifiPowerSaveGuard psGuard;
   freeink::SecureHttpClient http;
   http.setUserAgent("CrossPoint");
   // The SecureNet transport ships no CA bundle, so peer verification always
@@ -2189,6 +2191,7 @@ void CrossPointWebServer::handleFetch() {
   // the file is rewound before its first chunk lands.
   suspendTransferServices();
   ScopedCleanup resumeServices{[this] { resumeTransferServices(); }};
+  WifiPowerSaveGuard psGuard;
 
   // A resume keeps all prior progress, so only consecutive zero-progress
   // attempts count against the cap; the absolute ceiling is a backstop

@@ -4,10 +4,11 @@
 #include <Logging.h>
 #include <SecureHttpClient.h>
 #include <base64.h>
-#include <esp_wifi.h>
 
 #include <functional>
 #include <string>
+
+#include "WifiPowerSaveGuard.h"
 
 extern "C" void wolfSSL_Arduino_Serial_Print(const char* const msg) { LOG_DBG("WOLFSSL", "%s", msg); }
 
@@ -29,20 +30,6 @@ struct Sink {
 bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
-
-// OPDS feed/book fetches can run for minutes on a large category. Modem sleep
-// powers the radio down between DTIM beacons and can stall packets mid-transfer,
-// so disable WiFi power-save for the duration of the download and restore it after.
-struct WifiPowerSaveGuard {
-  WifiPowerSaveGuard() {
-    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
-    if (err != ESP_OK) LOG_ERR("HTTP", "Failed to disable WiFi power-save: %d", err);
-  }
-  ~WifiPowerSaveGuard() {
-    esp_err_t err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
-    if (err != ESP_OK) LOG_ERR("HTTP", "Failed to restore WiFi power-save: %d", err);
-  }
-};
 
 // All HTTP(S) fetches go through wolfSSL (the firmware's only TLS stack: it
 // speaks TLS 1.3 and reads large bodies reliably). Plain-http URLs still use a

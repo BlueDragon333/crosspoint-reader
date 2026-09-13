@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "network/WifiPowerSaveGuard.h"
+
 namespace {
 constexpr size_t MAX_TOKEN_FILE_SIZE = 2 * 1024;
 
@@ -163,6 +165,7 @@ void loadConfigFile(const std::string& file, Headers& out) {
 
 int request(freeink::SecureHttpClient* session, const std::string& url, const std::string& method,
             const std::string& body, const Headers& headers, String& out, const size_t maxResponse) {
+  WifiPowerSaveGuard psGuard;
   freeink::SecureHttpClient tmp;
   freeink::SecureHttpClient* httpPtr = openClient(session, tmp, url, headers);
   if (!httpPtr) return -1;
@@ -198,6 +201,7 @@ int request(freeink::SecureHttpClient* session, const std::string& url, const st
 
 int requestToFile(freeink::SecureHttpClient* session, const std::string& url, const std::string& method,
                   const std::string& body, const Headers& headers, const char* destPath, const size_t maxResponse) {
+  WifiPowerSaveGuard psGuard;
   freeink::SecureHttpClient tmp;
   freeink::SecureHttpClient* httpPtr = openClient(session, tmp, url, headers);
   if (!httpPtr) return -1;
