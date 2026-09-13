@@ -50,6 +50,8 @@ add_subdirectory(combining_marks)
 add_subdirectory(credential_integrity)
 add_subdirectory(xml_parser_utils)
 add_subdirectory(token_boundary)
+add_subdirectory(koreader_xpath_resolver)
+add_subdirectory(progress_comparison)
 add_subdirectory(font_cache_manager)
 add_subdirectory(css_parser)
 add_subdirectory(chapter_html_slim_parser)
@@ -58,3 +60,8 @@ add_subdirectory(page_link)
 add_subdirectory(chapter_position)
 
 add_subdirectory(inflate_stream)
+add_subdirectory(fs_helpers)
+
+add_subdirectory(absolute_grayscale)
+
+add_subdirectory(sd_card_font)
