@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "activities/Activity.h"
-#include "util/ButtonNavigator.h"
 
 class ClipSelectionActivity final : public Activity {
  public:
@@ -70,5 +69,5 @@ class ClipSelectionActivity final : public Activity {
   int touchDragStartY = 0;
   int touchDragPageEndIndex = -1;
   unsigned long touchDragPageEndHeldSince = 0;
-  ButtonNavigator buttonNavigator;
+  unsigned long lastHorizontalMoveTime = 0;
 };
