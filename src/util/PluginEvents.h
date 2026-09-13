@@ -18,8 +18,7 @@ class GfxRenderer;
 //       "toast": "Synced {event.book}"
 //     },
 //     "sleep.enter": {
-//       "download": { "url": "https://.../daily.bmp", "dest": "/sleep.bmp" },
-//       "connect": true
+//       "download": { "url": "https://.../daily.bmp", "dest": "/sleep.bmp" }
 //     }
 //   }
 //
@@ -32,6 +31,12 @@ class GfxRenderer;
 // nothing beyond that; drain() later replays queued events through the
 // declared requests whenever the device is already online. Substitution in
 // url/body/headers/toast: {token}, {cfg.KEY}, and the event's {event.*} vars.
+//
+// sleep.enter exists to act before the chip powers down (a fresh sleep image,
+// a pre-sleep progress push), so subscribing implies "connect": true: the
+// sleep path brings WiFi up to deliver it at sleep entry rather than waiting
+// for the next online session. Delivery stays at-least-once — a failed
+// sleep-time drain leaves the events queued for the next drain.
 //
 // Whitelist only: unknown names in a manifest are ignored with a log line, so
 // manifests written against newer firmware degrade gracefully. Event names are
@@ -61,9 +66,10 @@ void refreshSubscriptions();
 bool anySubscriber(Event e);
 
 // True when some subscriber to `e` marks its handler "connect": true AND has
-// queued events waiting: the caller may bring WiFi up (bounded, opt-in) so
-// delivery happens now instead of the next online session. Used by the sleep
-// path to fetch e.g. a fresh sleep image before the chip powers down.
+// queued events waiting: the caller may bring WiFi up (bounded) so delivery
+// happens now instead of the next online session. sleep.enter subscriptions
+// imply connect (see above). Used by the sleep path to fetch e.g. a fresh
+// sleep image before the chip powers down.
 bool wantsConnect(Event e);
 
 // Appends the event to each subscribing plugin's outbox. No-op without

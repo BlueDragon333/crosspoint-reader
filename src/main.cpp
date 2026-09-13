@@ -274,14 +274,16 @@ static bool loadSleepFrameBuffer() {
   return true;
 }
 
-// Queued plugin-event delivery on the way into deep sleep. Deep sleep is a
-// chip reset, so handlers normally run on the next online session; two cases
-// deliver now instead: WiFi is already up, or a handler opted into
-// "connect": true (e.g. fetching a fresh /sleep.bmp so THIS sleep shows it —
-// the drain runs before goToSleep() renders the sleep screen). The connect
-// path is bounded (join deadline + drain event budget), skipped on low
-// battery, and any failure just sleeps with the previous image; the caller's
-// WiFi shutdown tears the radio down either way.
+// Plugin-event delivery on the way into deep sleep. sleep.enter is delivered
+// now — over the live connection, or by bringing WiFi up when a plugin
+// subscribes (e.g. fetching a fresh /sleep.bmp so THIS sleep shows it — the
+// drain runs before goToSleep() renders the sleep screen). The connect path
+// is bounded (join deadline + drain event budget), skipped on low battery,
+// and sleep is never blocked on the network: a failed join or delivery just
+// sleeps with the previous image and the queued events retry on the next
+// drain (at-least-once). The caller's WiFi shutdown tears the radio down
+// either way. Deferrable events already queued (reader.exit) ride along in
+// the same drain.
 static void deliverSleepPluginEvents() {
   // Sleeping straight out of a book is the common flow, but the reader's own
   // reader.exit only fires later, inside goToSleep() — after this drain. Carry
@@ -299,25 +301,23 @@ static void deliverSleepPluginEvents() {
   pluginevents::emit(pluginevents::Event::SleepEnter, vars, varCount);
   if (WiFi.status() == WL_CONNECTED) {
     pluginevents::drain(&renderer);
-    return;
-  }
-  if (!pluginevents::wantsConnect(pluginevents::Event::SleepEnter)) return;
-  if (powerManager.getBatteryPercentage() < 20) return;
-  const auto cred = WIFI_STORE.findCredential(WIFI_STORE.getLastConnectedSsid());
-  if (!cred) return;
-
-  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(cred->ssid.c_str(), cred->password.c_str());
-  const unsigned long joinDeadline = millis() + 10000;
-  while (WiFi.status() != WL_CONNECTED && millis() < joinDeadline) {
-    delay(100);
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    trustedtime::startSync();  // snap the clock floor while the network is up
-    pluginevents::drain(&renderer);
-  } else {
-    LOG_DBG("MAIN", "Sleep-event WiFi join timed out; deferring delivery");
+  } else if (pluginevents::wantsConnect(pluginevents::Event::SleepEnter) && powerManager.getBatteryPercentage() >= 20) {
+    const auto cred = WIFI_STORE.findCredential(WIFI_STORE.getLastConnectedSsid());
+    if (cred) {
+      GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(cred->ssid.c_str(), cred->password.c_str());
+      const unsigned long joinDeadline = millis() + 10000;
+      while (WiFi.status() != WL_CONNECTED && millis() < joinDeadline) {
+        delay(100);
+      }
+      if (WiFi.status() == WL_CONNECTED) {
+        trustedtime::startSync();  // snap the clock floor while the network is up
+        pluginevents::drain(&renderer);
+      } else {
+        LOG_DBG("MAIN", "Sleep-event WiFi join timed out; deferring delivery");
+      }
+    }
   }
 }
 

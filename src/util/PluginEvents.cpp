@@ -86,6 +86,10 @@ void refreshSubscriptions() {
       mask |= static_cast<uint8_t>(1u << e);
       if (kv.value()["connect"] | false) connectMask |= static_cast<uint8_t>(1u << e);
     }
+    // sleep.enter exists to act before the chip powers down (sleep image,
+    // pre-sleep sync), so subscribing implies "connect": true; requiring the
+    // flag would make the common case silently defer to the next session.
+    if (mask & eventBit(Event::SleepEnter)) connectMask |= eventBit(Event::SleepEnter);
     if (mask == 0) continue;
     Subscriber& sub = subscribers[slot++];
     strncpy(sub.name, entry.name.c_str(), sizeof(sub.name) - 1);

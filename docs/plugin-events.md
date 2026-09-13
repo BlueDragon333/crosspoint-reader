@@ -22,8 +22,13 @@ Plugin event handlers need the network, and most events fire with WiFi down
 plugin's outbox (`<plugin dir>/events.jsonl`) — an SD append, nothing more —
 and the queue is drained through the declared requests whenever the device is
 already online: when the File Transfer web server comes up in Join Network
-mode, or on the way into sleep (see the `connect` flag below). Delivery is
-at-least-once and in order; dedupe on `ts` server-side if it matters.
+mode, or on the way into sleep. Delivery is at-least-once and in order; dedupe
+on `ts` server-side if it matters.
+
+`sleep.enter` gets special timing: it exists to act before the chip powers
+down (a fresh sleep image, a pre-sleep progress push), so the sleep path
+actively brings WiFi up to deliver it at sleep entry instead of waiting for
+the next online session. See "sleep.enter delivery" below.
 
 ## The event whitelist
 
@@ -58,8 +63,7 @@ current position is pushed on the sleep connection, not the next one.
     "toast": "Synced {event.book}"
   },
   "sleep.enter": {
-    "download": { "url": "{cfg.server}/daily.bmp", "dest": "/sleep.bmp" },
-    "connect": true
+    "download": { "url": "{cfg.server}/daily.bmp", "dest": "/sleep.bmp" }
   }
 }
 ```
@@ -80,12 +84,20 @@ Optional per handler:
 
 - **`toast`** — a template shown as the standard popup after the request
   succeeds, when a screen is available (sleep entry, web-server session).
-- **`connect`** — normally the drain only runs when the device is already
-  online. `"connect": true` opts this handler into WiFi bring-up at **sleep
-  entry only**: if events are queued for it, battery is at least 20%, and a
-  saved credential exists for the last-connected network, the device shows a
-  popup, joins with a 10-second deadline, drains, and proceeds to sleep. A
-  failed join just defers delivery; sleep is never blocked on the network.
+
+## sleep.enter delivery
+
+Subscribing to `sleep.enter` means the device tries to deliver it at sleep
+entry. If WiFi is not already up, the device brings it up for the drain: with
+battery at least 20% and a saved credential for the last-connected network, it
+shows a popup, joins with a 10-second deadline, drains, and proceeds to sleep.
+Sleep is never blocked on the network — a failed join, low battery, or a
+mid-drain failure just sleeps with the previous image, and the queued events
+retry on the next drain like any other (at-least-once; a handler whose action
+only made sense for that particular sleep should tolerate or ignore the late
+retry, e.g. by checking `{event.ts}`). Other events already queued for the
+same plugin (`reader.exit` and friends) ride along in the sleep-time drain.
+A `"connect": true` key is still accepted but is implied by the subscription.
 
 Auth reuses the catalog vocabulary from the same `device.json`: `{token}` is
 read from the declared token file, and on a 401/403 a `"password"`-type auth
@@ -163,7 +175,7 @@ belongs on the service's server, keyed by the id in the sidecar.
 
 A sync plugin writes `{"bookfusion_id": "36835"}` to the sidecar when it
 fetches a book, and binds the same progress `request` to `reader.exit` and
-`sleep.enter` with `"connect": true`. The user reads offline for a week and
+`sleep.enter`. The user reads offline for a week and
 presses sleep: the device queues the event with the current percent, joins the
 saved network for a few seconds, POSTs
 `{"id":"36835","pct":74,"ts":1734212345}` to the plugin's server, shows
