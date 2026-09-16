@@ -7,6 +7,7 @@
 #include <Logging.h>
 #include <components/bars/tap-zones.h>
 
+#include "HapticFeedback.h"
 #include "MappedInputManager.h"
 #include "activities/ActivityManager.h"
 
