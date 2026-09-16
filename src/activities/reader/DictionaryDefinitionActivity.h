@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Epub/Page.h>
+#include <I18n.h>
 
 #include <cstdint>
 #include <memory>
@@ -8,7 +9,9 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "activities/reader/DictionaryWordSelection.h"
 #include "util/ButtonNavigator.h"
+#include "util/Dictionary.h"
 
 // Paged viewer for one dictionary definition. HTML definitions are laid out
 // through the EPUB chapter parser into styled Pages; anything else (plain
@@ -16,12 +19,8 @@
 // page renders spans of the original string, so no per-line copies are held.
 class DictionaryDefinitionActivity final : public Activity {
  public:
-  explicit DictionaryDefinitionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string headword,
-                                        std::string definition, bool htmlDefinition = false)
-      : Activity("DictionaryDefinition", renderer, mappedInput),
-        headword(std::move(headword)),
-        definition(std::move(definition)),
-        htmlDefinition(htmlDefinition) {}
+  explicit DictionaryDefinitionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Dictionary& dictionary,
+                                        const char* query, std::string headword, std::string definition);
 
   void onEnter() override;
   void onExit() override;
@@ -38,17 +37,50 @@ class DictionaryDefinitionActivity final : public Activity {
 
   // Usable body-text area between the header and the button hints.
   struct BodyArea {
+    int x;
+    int y;
     int width;
     int height;
   };
 
   BodyArea bodyArea() const;
+  void prepareDefinition();
+  void releaseDefinition();
   bool layoutHtmlPages();
   void wrapText();
   int measureSpan(int fontId, const char* text, size_t len) const;
   void drawBody(int fontId, int x, int startY) const;
 
-  const std::string headword;
+  using Word = DictionaryWordSelection::Word;
+  size_t collectWords(Word* output) const;
+  void startSelection();
+  void drawSelection(int fontId) const;
+  void showMessage(StrId message);
+  void showLookupError(Dictionary::LookupResult result);
+  enum class Navigation { Forward, Back };
+  void navigate(Navigation direction);
+
+  static constexpr size_t HISTORY_CAPACITY = 8;
+  static constexpr size_t QUERY_BYTES = 256;
+  struct HistoryEntry {
+    char query[QUERY_BYTES] = {};
+    int page = 0;
+  };
+  HistoryEntry history[HISTORY_CAPACITY];
+  size_t historySize = 0;
+  char currentQuery[QUERY_BYTES] = {};
+  char pendingQuery[QUERY_BYTES] = {};
+  // Owned by the reader's word selector, which stays below us on the activity stack.
+  Dictionary& dictionary;
+  std::unique_ptr<Word[]> words;
+  size_t wordCount = 0;
+  int selected = 0;
+  unsigned long lastHorizontalMoveTime = 0;
+  bool showingMessage = false;
+  StrId message = StrId::STR_DICT_NOT_FOUND;
+  unsigned long messageTime = 0;
+
+  std::string headword;
   // Not const: onEnter() normalizes embedded NULs (StarDict multi-type
   // separators) to newlines so C-string APIs see the whole text.
   std::string definition;

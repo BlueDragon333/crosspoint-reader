@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+inline constexpr int O_WRITE = 1;
+inline constexpr int O_CREAT = 2;
+inline constexpr int O_TRUNC = 4;
+
 namespace fake {
 
 struct Node {
@@ -156,6 +160,10 @@ class HalFile {
     pos += size;
     return static_cast<int>(size);
   }
+  int read() {
+    uint8_t byte;
+    return read(&byte, 1) == 1 ? byte : -1;
+  }
   size_t write(const uint8_t* data, const size_t size) {
     if (size == 0) return 0;
     fake::writesByPath[path]++;
@@ -195,9 +203,16 @@ class HalStorage {
     }
     return file;
   }
+  HalFile open(const char* path, int flags) {
+    if (flags & O_TRUNC) fake::add(path, "");
+    return open(path);
+  }
   bool openFileForRead(const char*, const char* path, HalFile& file) {
     file = open(path);
     return bool(file);
+  }
+  bool openFileForRead(const char* module, const std::string& path, HalFile& file) {
+    return openFileForRead(module, path.c_str(), file);
   }
   bool openFileForWrite(const char*, const char* path, HalFile& file) {
     fake::add(path, "");

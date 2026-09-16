@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "activities/reader/DictionaryWordSelection.h"
 #include "util/Dictionary.h"
 
 // Word selection over the current reader page: Left/Right step through words
@@ -27,23 +28,9 @@ class DictionaryWordSelectActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  // Screen box of one selectable word. `text` points into the owned Page's
-  // TextBlock arena (NUL-terminated), valid for this activity's lifetime.
-  struct WordBox {
-    int16_t x;
-    int16_t y;
-    int16_t width;
-    uint16_t row;
-    const char* text;
-    EpdFontFamily::Style style;
-  };
-
   enum class Popup : uint8_t { None, Busy, NotFound, Error };
 
   void extractWords();
-  int closestInRow(uint16_t row, int centerX) const;
-  int wordAt(int x, int y) const;
-  void moveVertical(int direction);
   void performLookup();
   bool drawHighlightWithSnapshot();
   void drawHints() const;
@@ -54,7 +41,7 @@ class DictionaryWordSelectActivity final : public Activity {
   int fontId = 0;
   int lineHeight = 0;
 
-  std::vector<WordBox> words;
+  std::vector<DictionaryWordSelection::Word> words;
   int selected = 0;
   uint16_t rowCount = 0;
   unsigned long lastHorizontalMoveTime = 0;

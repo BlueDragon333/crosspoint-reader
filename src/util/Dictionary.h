@@ -84,6 +84,14 @@ class Dictionary {
   bool lookup(const char* word, std::string& definitionOut, std::string& matchedHeadwordOut,
               LookupResult* outResult = nullptr);
 
+  // Search only: uses the same cleaning, synonyms and stemming as lookup().
+  // A found location belongs to this open dictionary; no definition is read.
+  DictLocation findEntry(const char* word, std::string& matchedHeadwordOut, LookupResult* outResult = nullptr);
+
+  // Read a previously found entry. Callers can release their old definition
+  // after findEntry succeeds, before allocating the replacement here.
+  bool readDefinition(const DictLocation& location, std::string& out, LookupResult* outResult = nullptr);
+
   static std::string cleanWord(const char* word);
 
   static constexpr uint32_t MAX_DEFINITION_BYTES = 64 * 1024;
@@ -173,9 +181,6 @@ class Dictionary {
   // buildIndex() so each sidecar is rebuilt only when actually stale.
   static bool sidecarIsStale(const std::string& sourcePath, const std::string& sidecarPath, uint32_t magic);
 
-  // Read the definition at location. On failure returns false and, if outResult
-  // is given, sets it to the specific reason (Decompress / LowMemory / ReadError).
-  bool readDefinition(const DictLocation& location, std::string& out, LookupResult* outResult = nullptr);
   static void stemVariants(const std::string& word, std::vector<std::string>& out);
 
   // Read a null-terminated word from an open file into buf (max bufSize-1

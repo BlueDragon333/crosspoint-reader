@@ -562,6 +562,7 @@ bool Dictionary::readDefinition(const DictLocation& location, std::string& out, 
     out.clear();
     return fail(LookupResult::ReadError);
   }
+  if (outResult) *outResult = LookupResult::Found;
   return true;
 }
 
@@ -629,12 +630,17 @@ void Dictionary::stemVariants(const std::string& word, std::vector<std::string>&
 
 bool Dictionary::lookup(const char* word, std::string& definitionOut, std::string& matchedHeadwordOut,
                         LookupResult* outResult) {
+  const auto location = findEntry(word, matchedHeadwordOut, outResult);
+  return location.found && readDefinition(location, definitionOut, outResult);
+}
+
+DictLocation Dictionary::findEntry(const char* word, std::string& matchedHeadwordOut, LookupResult* outResult) {
   const auto setResult = [outResult](LookupResult r) {
     if (outResult) *outResult = r;
   };
   setResult(LookupResult::NotFound);
   const std::string cleaned = cleanWord(word);
-  if (cleaned.empty() || !isOpen()) return false;
+  if (cleaned.empty() || !isOpen()) return {};
 
   // One set of open handles for the exact-match probe, the synonym probe and
   // every stem variant, scoped so .idx/.qidx (and .syn/.sidx) close before
@@ -647,7 +653,7 @@ bool Dictionary::lookup(const char* word, std::string& definitionOut, std::strin
     // failure, not a miss.
     if (!openSession(session)) {
       setResult(LookupResult::ReadError);
-      return false;
+      return {0, 0, false, true};
     }
 
     location = locate(session, cleaned.c_str(), &matchedHeadwordOut);
@@ -675,14 +681,9 @@ bool Dictionary::lookup(const char* word, std::string& definitionOut, std::strin
     // read failure, not a miss — reporting "Not found" is the bug this PR exists
     // for. Otherwise the word is genuinely not in the dictionary.
     if (searchFailed) setResult(LookupResult::ReadError);
-    return false;
+    location.readError = searchFailed;
+    return location;
   }
-
-  // Found in the index — propagate the precise failure reason from readDefinition
-  // (decompression / low memory / read error) so the caller can name it.
-  if (readDefinition(location, definitionOut, outResult)) {
-    setResult(LookupResult::Found);
-    return true;
-  }
-  return false;
+  setResult(LookupResult::Found);
+  return location;
 }

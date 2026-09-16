@@ -52,9 +52,12 @@ When a word is found, the definition screen shows the matched headword at the to
 HTML dictionaries that declare `sametypesequence=h` use the EPUB text-layout engine for semantic formatting such as headings, bold, italics, lists, and line breaks. Images and CSS styling are ignored. Definitions that are too large or cannot be laid out within the available memory fall back to plain text.
 
 - **Left/Right** or side **Up/Down** — previous / next page
-- **Back** — return to word selection
+- **Confirm (Look Up)** — select a word on the current definition page. Use the directional buttons to move, then press **Confirm** again to look it up. On touch devices, tap a word while selecting to look it up.
+- **Back** — leave word selection, or return to the previous definition. At the first definition, return to the book's word selection.
 
+You can follow up to eight nested lookups. At the limit, go back before looking up another word. Returning to a definition restores its page, but resets the word cursor.
 
+If a word is not found, the current definition stays open. Once an entry is found, the reader releases the old definition before loading the new one. If loading fails, it tries to reload the previous definition. If that also fails, it returns to the book's word selection.
 
 ## Where to find dictionaries
 

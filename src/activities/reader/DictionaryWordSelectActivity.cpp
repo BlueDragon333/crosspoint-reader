@@ -6,10 +6,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include <cctype>
-#include <climits>
-#include <cstdlib>
-
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "components/UITheme.h"
@@ -17,26 +13,6 @@
 namespace {
 
 constexpr unsigned long POPUP_DURATION_MS = 1500;
-constexpr unsigned long WORD_REPEAT_START_MS = 500;
-constexpr unsigned long WORD_REPEAT_INTERVAL_MS = 500;
-
-// A token is selectable when it has an ASCII alphanumeric or a non-ASCII
-// codepoint outside U+2000-U+206F (dashes, bullets and other General
-// Punctuation that appear as standalone tokens are not words).
-bool isSelectableToken(const char* text) {
-  for (const uint8_t* p = reinterpret_cast<const uint8_t*>(text); *p != 0; p++) {
-    if (*p < 0x80) {
-      if (std::isalnum(*p)) return true;
-    } else if (*p == 0xE2 && (p[1] == 0x80 || p[1] == 0x81)) {
-      if (p[2] == 0) break;  // truncated sequence: skipping would step past the NUL
-      p += 2;                // skip the 3-byte General Punctuation codepoint
-    } else {
-      return true;
-    }
-  }
-  return false;
-}
-
 void indexBuildYield(void*) { vTaskDelay(1); }
 
 }  // namespace
@@ -53,7 +29,8 @@ void DictionaryWordSelectActivity::onEnter() {
   // Start on the middle row's word nearest mid-screen instead of top-left:
   // any word on the page is then at most half a page of moves away.
   if (!words.empty()) {
-    const int initial = closestInRow(rowCount / 2, renderer.getScreenWidth() / 2);
+    const int initial =
+        DictionaryWordSelection::closestInRow(words.data(), words.size(), rowCount / 2, renderer.getScreenWidth() / 2);
     if (initial >= 0) selected = initial;
   }
   requestUpdate();
@@ -84,15 +61,17 @@ void DictionaryWordSelectActivity::extractWords() {
     const int rubyShift = block->getRubyShift(ascender);
     for (uint16_t i = 0; i < block->wordCount(); i++) {
       const char* text = block->wordText(i);
-      if (!isSelectableToken(text)) continue;
+      const uint16_t length = block->wordTextLen(i);
+      if (!DictionaryWordSelection::isSelectable(text, length)) continue;
 
-      WordBox box;
+      DictionaryWordSelection::Word box;
+      box.text = text;
       box.x = static_cast<int16_t>(line->xPos + block->wordXpos(i) + marginLeft);
       box.y = static_cast<int16_t>(line->yPos + marginTop + rubyShift);
-      box.style = block->wordStyle(i);
       box.width = 0;  // measured below, once the advance table is ready
+      box.length = length;
       box.row = rowCount;
-      box.text = text;
+      box.style = static_cast<uint8_t>(block->wordStyle(i));
       words.push_back(box);
       rowHasWords = true;
 
@@ -106,49 +85,8 @@ void DictionaryWordSelectActivity::extractWords() {
   if (styleMask == 0) styleMask = 0x01;  // REGULAR
   renderer.ensureSdCardFontReady(fontId, pageText.c_str(), styleMask);
   for (auto& word : words) {
-    word.width = static_cast<int16_t>(renderer.getTextAdvanceX(fontId, word.text, word.style));
-  }
-}
-
-// Index of the word whose box (with finger-sized slop) contains the touch
-// point; -1 when the touch lands on no word. Boxes never overlap after the
-// slop grows them, at worst they touch, so first hit wins.
-int DictionaryWordSelectActivity::wordAt(const int x, const int y) const {
-  constexpr int SLOP = 4;  // matches the highlight box (+2) plus finger error
-  for (int i = 0; i < static_cast<int>(words.size()); i++) {
-    const WordBox& word = words[i];
-    if (x >= word.x - SLOP && x < word.x + word.width + SLOP && y >= word.y - SLOP && y < word.y + lineHeight + SLOP) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-// Index of the word in `row` whose horizontal center is closest to centerX;
-// -1 when the row has no words.
-int DictionaryWordSelectActivity::closestInRow(const uint16_t row, const int centerX) const {
-  int best = -1;
-  int bestDistance = INT_MAX;
-  for (int i = 0; i < static_cast<int>(words.size()); i++) {
-    if (words[i].row != row) continue;
-    const int distance = std::abs(words[i].x + words[i].width / 2 - centerX);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = i;
-    }
-  }
-  return best;
-}
-
-void DictionaryWordSelectActivity::moveVertical(const int direction) {
-  const WordBox& current = words[selected];
-  const int targetRow = static_cast<int>(current.row) + direction;
-  if (targetRow < 0 || targetRow >= static_cast<int>(rowCount)) return;
-
-  const int best = closestInRow(static_cast<uint16_t>(targetRow), current.x + current.width / 2);
-  if (best >= 0 && best != selected) {
-    selected = best;
-    requestUpdate();
+    word.width = static_cast<int16_t>(
+        renderer.getTextAdvanceX(fontId, word.text, static_cast<EpdFontFamily::Style>(word.style)));
   }
 }
 
@@ -178,11 +116,18 @@ void DictionaryWordSelectActivity::performLookup() {
   const bool found = ok && dict.lookup(words[selected].text, definition, headword, &result);
 
   if (found) {
+    auto activity = makeUniqueNoThrow<DictionaryDefinitionActivity>(renderer, mappedInput, dict, words[selected].text,
+                                                                    std::move(headword), std::move(definition));
+    if (!activity) {
+      LOG_ERR("DICT", "OOM: definition activity");
+      popup = Popup::Error;
+      popupMsg = StrId::STR_DICT_LOW_MEMORY;
+      popupTime = millis();
+      requestUpdate();
+      return;
+    }
     popup = Popup::None;
-    startActivityForResult(
-        std::make_unique<DictionaryDefinitionActivity>(renderer, mappedInput, std::move(headword),
-                                                       std::move(definition), dict.definitionsAreHtml()),
-        [this](const ActivityResult&) { requestUpdate(); });
+    startActivityForResult(std::move(activity), [this](const ActivityResult&) { requestUpdate(); });
     return;
   }
   // Name the failure: a genuine miss is "Not found"; a word that WAS found but
@@ -254,7 +199,7 @@ void DictionaryWordSelectActivity::loop() {
   int tx = 0;
   int ty = 0;
   if (mappedInput.wasScreenTouchDown(tx, ty)) {
-    const int hit = wordAt(tx, ty);
+    const int hit = DictionaryWordSelection::wordAt(words.data(), words.size(), tx, ty, lineHeight);
     if (hit >= 0 && hit != selected) {
       selected = hit;
       requestUpdate();
@@ -262,7 +207,7 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
   if (mappedInput.wasScreenTapped(tx, ty)) {
-    const int hit = wordAt(tx, ty);
+    const int hit = DictionaryWordSelection::wordAt(words.data(), words.size(), tx, ty, lineHeight);
     if (hit >= 0) {
       selected = hit;
       performLookup();
@@ -270,27 +215,9 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
 
-  const bool hasNextWord = selected + 1 < static_cast<int>(words.size());
-  const unsigned long now = millis();
-  const bool repeat =
-      mappedInput.getHeldTime() >= WORD_REPEAT_START_MS && now - lastHorizontalMoveTime >= WORD_REPEAT_INTERVAL_MS;
-  const bool moveLeft = mappedInput.wasPressed(MappedInputManager::Button::ScreenLeft) ||
-                        (repeat && mappedInput.isPressed(MappedInputManager::Button::ScreenLeft));
-  const bool moveRight = mappedInput.wasPressed(MappedInputManager::Button::ScreenRight) ||
-                         (repeat && mappedInput.isPressed(MappedInputManager::Button::ScreenRight));
-  if (moveLeft && selected > 0) {
-    selected--;
-    lastHorizontalMoveTime = now;
+  if (DictionaryWordSelection::move(mappedInput, words.data(), words.size(), selected, lastHorizontalMoveTime,
+                                    millis()))
     requestUpdate();
-  } else if (moveRight && hasNextWord) {
-    selected++;
-    lastHorizontalMoveTime = now;
-    requestUpdate();
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::ScreenUp)) {
-    moveVertical(-1);
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::ScreenDown)) {
-    moveVertical(1);
-  }
 }
 
 // Saves the pixels under words[selected]'s highlight box, then draws the
@@ -298,7 +225,7 @@ void DictionaryWordSelectActivity::loop() {
 // (no buffer / oversize box) — the highlight is drawn regardless, but the
 // next cursor move must do a full repaint.
 bool DictionaryWordSelectActivity::drawHighlightWithSnapshot() {
-  const WordBox& word = words[selected];
+  const auto& word = words[selected];
   int hx = word.x - 2;
   int hy = word.y - 2;
   int hw = word.width + 4;
@@ -324,7 +251,7 @@ bool DictionaryWordSelectActivity::drawHighlightWithSnapshot() {
   snapshotIdx = saved ? selected : -1;
 
   renderer.fillRect(hx, hy, hw, hh, true);
-  renderer.drawText(fontId, word.x, word.y, word.text, false, word.style);
+  renderer.drawText(fontId, word.x, word.y, word.text, false, static_cast<EpdFontFamily::Style>(word.style));
   return saved;
 }
 

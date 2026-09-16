@@ -64,6 +64,8 @@ add_subdirectory(page_link)
 add_subdirectory(content_opf_parser)
 add_subdirectory(chapter_position)
 add_subdirectory(home_button)
+add_subdirectory(dictionary_lookup)
+add_subdirectory(dictionary_definition)
 
 add_subdirectory(inflate_stream)
 add_subdirectory(fs_helpers)
