@@ -61,6 +61,12 @@ void appendShapedRtlTokens(const char* text, std::string& shapedOut) {
 }  // namespace
 
 const uint8_t* GfxRenderer::getGlyphBitmap(const EpdFontData* fontData, const EpdGlyph* glyph) const {
+  // Vector (TTF) fonts: the glyph bitmap lives in the font's own cache, keyed by
+  // the EpdGlyph the miss handler returned. Checked first so it never reaches the
+  // SdCardFont overflow cast below. nullptr = zero-width glyph (e.g. space).
+  if (fontData->vectorBitmapHandler != nullptr) {
+    return fontData->vectorBitmapHandler(fontData->glyphMissCtx, glyph);
+  }
   if (fontData->groups != nullptr) {
     auto* fd = fontCacheManager_ ? fontCacheManager_->getDecompressor() : nullptr;
     if (!fd) {
@@ -99,17 +105,10 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_
     }
     return;
   }
-  // TTF (vector) font: rebuild the eager per-page glyph set for this text (plus
-  // any shaped RTL presentation forms). See TtfEpdFont.
-  auto tit = ttfFonts_.find(fontId);
-  if (tit != ttfFonts_.end() && tit->second) {
-    // Accumulate: layout visits every paragraph before the page is drawn, so
-    // the drawn glyphs are all resident by render time (see TtfEpdFont).
-    tit->second->addCoverage(utf8Text);
-    std::string shaped;
-    appendShapedRtlTokens(utf8Text, shaped);
-    if (!shaped.empty()) tit->second->addCoverage(shaped.c_str());
-  }
+  // TTF (vector) fonts need nothing here: getGlyph faults glyphs in on demand
+  // (glyphMissHandler), and the page's set is batch-warmed by the render scan's
+  // prewarmCache(). Pre-faulting a whole chapter's text during layout would just
+  // thrash the page-bounded cache, so it is intentionally omitted.
 }
 
 void GfxRenderer::ensureSdCardFontReady(int fontId, const std::deque<std::string>& words, bool includeHyphen,
@@ -130,14 +129,8 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const std::deque<std::string
     }
     return;
   }
-  // TTF (vector) font: rebuild the eager per-page glyph set from the word list.
-  auto tit = ttfFonts_.find(fontId);
-  if (tit != ttfFonts_.end() && tit->second) {
-    tit->second->addCoverage(words, includeHyphen);
-    std::string shaped;
-    for (const auto& w : words) appendShapedRtlTokens(w.c_str(), shaped);
-    if (!shaped.empty()) tit->second->addCoverage(shaped.c_str());
-  }
+  // TTF (vector) fonts: nothing to do — glyphs fault in on demand at getGlyph
+  // and the page is batch-warmed by the render scan (see the other overload).
 }
 
 void GfxRenderer::begin() {

@@ -240,4 +240,12 @@ typedef struct {
   /// answer from RAM-resident data without storage I/O.  Shares glyphMissCtx.
   /// nullptr for fonts whose interval table is already complete (built-ins).
   bool (*coverageHandler)(void* ctx, uint32_t codepoint);
+
+  /// Vector-font bitmap accessor (FreeInkFont / TtfEpdFont). When non-null,
+  /// GfxRenderer::getGlyphBitmap() returns vectorBitmapHandler(glyphMissCtx, glyph)
+  /// instead of indexing ->bitmap or going through the SdCardFont overflow path.
+  /// This lets a runtime-rasterized TTF fault + cache glyphs on ANY draw path
+  /// (via glyphMissHandler) without pre-warming. nullptr for every other font,
+  /// so the SD/built-in bitmap paths are unaffected (all fonts zero-init this).
+  const uint8_t* (*vectorBitmapHandler)(void* ctx, const EpdGlyph* glyph);
 } EpdFontData;

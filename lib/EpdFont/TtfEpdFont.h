@@ -1,30 +1,26 @@
 #pragma once
 
-// CrossPoint <- FreeInkFont adapter.
+// CrossPoint <- FreeInkFont adapter (lazy).
 //
 // Renders TrueType/OpenType through the FreeInkFont engine (freeink::font, an
-// stb_truetype backend) and packs the results into CrossPoint's own EpdFontData
-// glyph tables. The existing GfxRenderer / EpdFont draw path then renders TTF
-// text with NO changes to layout or rendering — a TTF-backed font simply looks
-// like any other EpdFont.
+// stb_truetype backend) and exposes it as a normal CrossPoint EpdFont, so the
+// existing GfxRenderer / EpdFont draw path renders TTF text with NO changes to
+// layout or rendering.
 //
-// Glyph cache model: incremental + bounded. Glyphs are rasterized once, on
-// demand, and appended into a FIXED, pre-allocated arena (so the EpdFontData
-// pointers the renderer holds never move). addCoverage() adds only the glyphs
-// it hasn't seen yet — it never re-rasterizes resident glyphs. When the arena
-// or glyph table fills, the whole cache flushes and rebuilds from the current
-// request, so memory is bounded by the arena size regardless of how long a
-// session runs. Size the arena for one page's worth of unique glyphs.
+// Glyph model: LAZY + bounded, exactly like SD card fonts. The EpdFontData
+// carries a glyphMissHandler (getGlyph faults a codepoint in on demand),
+// a vectorBitmapHandler (getGlyphBitmap returns the cached bytes), and a
+// coverageHandler (hasCodepoint for UI script fallback). Glyphs are rasterized
+// once into a FIXED pre-allocated arena and cached; when the arena/table fills
+// it flushes and refills. Because faulting happens inside getGlyph, EVERY draw
+// path works — reader, settings preview, UI, menus — with no per-path prewarm.
 //
-// Usage:
-//   static uint8_t g_ttf[...];               // font file bytes, kept resident
-//   TtfEpdFont ui;
-//   ui.load(g_ttf, g_ttf_len, /*sizePx=*/28);
-//   renderer.insertFont(FONT_ID, ui.family());
-//   renderer.registerTtfFont(FONT_ID, &ui);  // rebuilds per page via addCoverage
+// build()/addCoverage() are OPTIONAL batch pre-warms (fault a page's glyphs up
+// front so the first draw isn't a rasterization burst); rendering is correct
+// without them.
 //
-// Lifetime: the TTF bytes are BORROWED (point at PSRAM / mmap / a resident
-// heap buffer) and this object must outlive any GfxRenderer registration.
+// Lifetime: the TTF bytes are BORROWED (PSRAM / resident heap) and must outlive
+// this object; this object must outlive any GfxRenderer registration.
 
 #include <cstddef>
 #include <cstdint>
@@ -42,58 +38,54 @@
 class TtfEpdFont {
  public:
   // Borrow `ttfData` (must outlive this object) and prepare rasterization at
-  // `sizePx`. `rasterCacheBytes` backs the FreeInkFont rasterizer; `glyphCacheBytes`
-  // and `maxGlyphs` bound the packed EpdFont glyph cache (one page's worth).
-  bool load(const uint8_t* ttfData, uint32_t ttfLen, uint16_t sizePx, size_t rasterCacheBytes = 48 * 1024,
-            size_t glyphCacheBytes = 96 * 1024, uint16_t maxGlyphs = 1536);
+  // `sizePx`. `twoBit` = 4-level antialiased gray (false = 1-bit). The caches
+  // bound memory: `glyphCacheBytes`/`maxGlyphs` hold one page's glyphs.
+  bool load(const uint8_t* ttfData, uint32_t ttfLen, uint16_t sizePx, bool twoBit = true,
+            size_t rasterCacheBytes = 48 * 1024, size_t glyphCacheBytes = 96 * 1024, uint16_t maxGlyphs = 1536);
 
-  // Replace the resident glyph set with exactly the codepoints in `utf8`
-  // (plus the replacement glyph). `twoBit` = 4-level antialiased gray.
-  bool build(const char* utf8, bool twoBit = true);
-  bool build(const std::deque<std::string>& words, bool includeHyphen, bool twoBit = true);
+  // Optional batch pre-warm: fault the text's glyphs now. build() clears the
+  // cache first; addCoverage() adds. Rendering works without these.
+  bool build(const char* utf8);
+  bool build(const std::deque<std::string>& words, bool includeHyphen);
+  bool addCoverage(const char* utf8);
+  bool addCoverage(const std::deque<std::string>& words, bool includeHyphen);
 
-  // Incrementally ADD codepoints without evicting resident glyphs (only new
-  // ones are rasterized). This is what the renderer's per-text hook uses: layout
-  // visits every paragraph before the page is drawn, so accumulating guarantees
-  // each drawn glyph is resident. Flushes + rebuilds only if the arena fills.
-  bool addCoverage(const char* utf8, bool twoBit = true);
-  bool addCoverage(const std::deque<std::string>& words, bool includeHyphen, bool twoBit = true);
-
-  bool ready() const { return ready_; }
+  bool ready() const { return loaded_; }
   uint16_t sizePx() const { return sizePx_; }
 
-  // Renderer-facing handles. Valid while this object is alive; the EpdFont
-  // pointer itself is stable across rebuilds (only the glyph data it points to
-  // changes, and only between — never during — a render pass).
+  // Renderer-facing handles. The EpdFont is a stable, always-valid object once
+  // loaded (glyphs fault in behind it); valid while this object is alive.
   const EpdFont* epdFont() const { return loaded_ ? &font_ : nullptr; }
   EpdFontFamily family() const { return EpdFontFamily(epdFont()); }
 
  private:
-  // Ensure `cp` is resident: no-op if present, else rasterize + insert. Returns
-  // false only when the cache is full (caller flushes and retries).
-  bool ensureGlyph(uint32_t cp);
+  // EpdFontData handler trampolines (ctx = this).
+  static const EpdGlyph* missThunk(void* ctx, uint32_t codepoint);
+  static const uint8_t* bitmapThunk(void* ctx, const EpdGlyph* glyph);
+  static bool coverageThunk(void* ctx, uint32_t codepoint);
+
+  // Rasterize + cache one glyph and return its (stable) EpdGlyph, or nullptr if
+  // the font doesn't cover it. Flushes the cache first if it is full.
+  const EpdGlyph* faultGlyph(uint32_t codepoint);
   void flushGlyphs();
-  void refreshData();  // point data_ at the current buffers + metrics
-  // Add `cp`s (already font-covered) with flush-on-overflow, then refreshData().
-  bool addCps(const std::vector<uint32_t>& want, bool replace);
 
   freeink::font::TtfFont ttf_;
-  std::vector<uint8_t> rasterBuf_;  // FreeInkFont rasterizer cache
+  std::vector<uint8_t> rasterBuf_;  // FreeInkFont rasterizer scratch
   freeink::font::Arena rasterArena_;
   uint16_t sizePx_ = 0;
   bool loaded_ = false;
-  bool ready_ = false;
   bool twoBit_ = true;
 
-  // Bounded, incremental packed-glyph cache. Fixed capacity so the pointers in
-  // data_ never move. cps_ and glyphs_ stay sorted-parallel by codepoint.
-  std::vector<uint8_t> bmpArena_;  // sized once; append-only, offset = glyph.dataOffset
+  // Bounded, append-only packed-glyph cache. glyphs_ addresses are stable
+  // (reserved once, append-only). cpsSorted_/slotForCp_ are a sorted lookup.
+  std::vector<uint8_t> bmpArena_;  // fixed capacity; glyph.dataOffset indexes it
   size_t bmpUsed_ = 0;
   size_t bmpCap_ = 0;
   uint16_t maxGlyphs_ = 0;
-  std::vector<uint32_t> cps_;
   std::vector<EpdGlyph> glyphs_;
-  std::vector<EpdUnicodeInterval> intervals_;
+  std::vector<uint32_t> cpsSorted_;
+  std::vector<uint16_t> slotForCp_;
+
   EpdFontData data_{};
   EpdFont font_{&data_};
 };

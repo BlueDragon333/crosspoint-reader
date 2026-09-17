@@ -255,11 +255,14 @@ void SdCardFontSystem::setupTtfUiFallbacks(GfxRenderer& renderer) {
   // text redirects here (resolveTextFontId → setFallbackFont).
   for (const auto& ui : kUiFontSizes) {
     auto f = std::unique_ptr<TtfEpdFont>(new TtfEpdFont());
-    if (!f->load(ttfBytes_.data(), static_cast<uint32_t>(ttfBytes_.size()), ui.pointSize,
+    if (!f->load(ttfBytes_.data(), static_cast<uint32_t>(ttfBytes_.size()), ui.pointSize, /*twoBit=*/true,
                  /*rasterCacheBytes=*/24 * 1024, /*glyphCacheBytes=*/24 * 1024, /*maxGlyphs=*/512)) {
       continue;
     }
-    const int id = computeTtfFontId(ttfFamily_.c_str(), ui.pointSize);
+    // Distinct id from the reader-size font: a UI size can equal the reader size
+    // (e.g. both 12pt), which would collide on computeTtfFontId and be dropped
+    // as a duplicate. Salt the UI family name to separate the id spaces.
+    const int id = computeTtfFontId((ttfFamily_ + "\x01ui").c_str(), ui.pointSize);
     renderer.insertFont(id, f->family());
     renderer.registerTtfFont(id, f.get());
     renderer.setFallbackFont(ui.fontId, id);

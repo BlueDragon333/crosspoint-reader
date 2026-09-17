@@ -32,62 +32,83 @@ uint32_t nextCodepoint(const char*& p) {
   return 0xFFFDu;
 }
 
-constexpr uint32_t kReplacement = 0xFFFDu;
-
 }  // namespace
 
-bool TtfEpdFont::load(const uint8_t* ttfData, const uint32_t ttfLen, const uint16_t sizePx,
+bool TtfEpdFont::load(const uint8_t* ttfData, const uint32_t ttfLen, const uint16_t sizePx, const bool twoBit,
                       const size_t rasterCacheBytes, const size_t glyphCacheBytes, const uint16_t maxGlyphs) {
   loaded_ = false;
-  ready_ = false;
   sizePx_ = sizePx;
+  twoBit_ = twoBit;
   rasterBuf_.assign(rasterCacheBytes, 0);
   rasterArena_.init(rasterBuf_.data(), rasterBuf_.size());
   if (!ttf_.init(ttfData, ttfLen, rasterArena_)) return false;
 
   bmpCap_ = glyphCacheBytes;
-  bmpArena_.assign(bmpCap_, 0);  // fixed capacity: data() is stable for data_.bitmap
+  bmpArena_.assign(bmpCap_, 0);  // fixed capacity: data() is stable for glyph bytes
   bmpUsed_ = 0;
   maxGlyphs_ = maxGlyphs;
-  cps_.clear();
-  cps_.reserve(maxGlyphs);       // reserved once so inserts never realloc
   glyphs_.clear();
-  glyphs_.reserve(maxGlyphs);
-  intervals_.clear();
-  intervals_.reserve(maxGlyphs);
+  glyphs_.reserve(maxGlyphs);  // reserved once → appended glyph addresses are stable
+  cpsSorted_.clear();
+  cpsSorted_.reserve(maxGlyphs);
+  slotForCp_.clear();
+  slotForCp_.reserve(maxGlyphs);
+
+  const int ascent = ttf_.ascent(sizePx_);
+  const int lineHeight = ttf_.lineHeight(sizePx_);
+  data_ = EpdFontData{};
+  // No static glyph/interval/bitmap tables: everything faults through the
+  // handlers below (like an SD card font, minus the on-disk backing).
+  data_.advanceY = static_cast<uint8_t>(lineHeight > 255 ? 255 : (lineHeight < 0 ? 0 : lineHeight));
+  data_.ascender = ascent;
+  data_.descender = lineHeight - ascent > 0 ? lineHeight - ascent : 0;
+  data_.is2Bit = twoBit_;
+  data_.glyphMissHandler = &TtfEpdFont::missThunk;
+  data_.glyphMissCtx = this;
+  data_.coverageHandler = &TtfEpdFont::coverageThunk;
+  data_.vectorBitmapHandler = &TtfEpdFont::bitmapThunk;
+
   loaded_ = true;
-  refreshData();  // valid (empty) EpdFontData
   return true;
 }
 
 void TtfEpdFont::flushGlyphs() {
-  cps_.clear();
   glyphs_.clear();
-  intervals_.clear();
+  cpsSorted_.clear();
+  slotForCp_.clear();
   bmpUsed_ = 0;
 }
 
-bool TtfEpdFont::ensureGlyph(const uint32_t cp) {
-  // Resident already?
-  const auto it = std::lower_bound(cps_.begin(), cps_.end(), cp);
-  if (it != cps_.end() && *it == cp) return true;
-  if (glyphs_.size() >= maxGlyphs_) return false;  // table full → caller flushes
-  const size_t idx = static_cast<size_t>(it - cps_.begin());
+const EpdGlyph* TtfEpdFont::faultGlyph(const uint32_t cp) {
+  if (!loaded_ || !ttf_.hasGlyph(cp)) return nullptr;
+
+  // Already cached?
+  {
+    const auto it = std::lower_bound(cpsSorted_.begin(), cpsSorted_.end(), cp);
+    if (it != cpsSorted_.end() && *it == cp) {
+      return &glyphs_[slotForCp_[static_cast<size_t>(it - cpsSorted_.begin())]];
+    }
+  }
 
   const int16_t advPx = ttf_.advance(cp, sizePx_, freeink::font::StyleNone);
   const freeink::font::GlyphBitmap* g = ttf_.rasterize(cp, sizePx_);
+  uint32_t px = (g != nullptr && g->pixels != nullptr) ? static_cast<uint32_t>(g->width) * g->height : 0;
+  size_t bytes = px ? (twoBit_ ? (px + 3) / 4 : (px + 7) / 8) : 0;
+  if (bytes > bmpCap_) {  // single glyph larger than the whole arena: store metrics only
+    bytes = 0;
+    px = 0;
+  }
+
+  // Make room. Flush BEFORE writing so bmpUsed_/tables are consistent.
+  if (glyphs_.size() >= maxGlyphs_ || bmpUsed_ + bytes > bmpCap_) flushGlyphs();
 
   EpdGlyph eg{};
   eg.advanceX = static_cast<uint16_t>((advPx < 0 ? 0 : advPx) << 4);  // 12.4 fixed-point px
-
-  if (g != nullptr && g->width > 0 && g->height > 0 && g->pixels != nullptr) {
-    const uint32_t px = static_cast<uint32_t>(g->width) * g->height;
-    const size_t bytes = twoBit_ ? (px + 3) / 4 : (px + 7) / 8;
-    if (bmpUsed_ + bytes > bmpCap_) return false;  // arena full → caller flushes
+  if (px && g != nullptr && g->pixels != nullptr) {
     uint8_t* dst = bmpArena_.data() + bmpUsed_;
     for (size_t i = 0; i < bytes; ++i) dst[i] = 0;  // arena is reused across flushes
     for (uint32_t i = 0; i < px; ++i) {
-      const uint8_t a = g->pixels[i];  // 8-bit coverage, 0 = transparent
+      const uint8_t a = g->pixels[i];
       if (twoBit_) {
         const uint8_t v = static_cast<uint8_t>((a * 3u + 127u) / 255u);  // 0..3, 3 = black
         dst[i >> 2] |= static_cast<uint8_t>(v << ((3 - (i & 3)) * 2));
@@ -103,120 +124,58 @@ bool TtfEpdFont::ensureGlyph(const uint32_t cp) {
     eg.dataLength = static_cast<uint16_t>(bytes);
     bmpUsed_ += bytes;
   } else {
-    // Space / zero-outline glyph: advance only, no bitmap.
     eg.dataOffset = static_cast<uint32_t>(bmpUsed_);
-    eg.dataLength = 0;
+    eg.dataLength = 0;  // space / zero-outline / oversize glyph: advance only
   }
 
-  // Insert keeping cps_/glyphs_ sorted-parallel. reserve() above guarantees no
-  // reallocation, so data_.glyph stays valid; the shift only reorders entries
-  // between render passes (never during one).
-  cps_.insert(cps_.begin() + idx, cp);
-  glyphs_.insert(glyphs_.begin() + idx, eg);
+  glyphs_.push_back(eg);
+  const uint16_t newIdx = static_cast<uint16_t>(glyphs_.size() - 1);
+  // Insert into the sorted lookup (re-find: a flush above may have cleared it).
+  const auto it = std::lower_bound(cpsSorted_.begin(), cpsSorted_.end(), cp);
+  const size_t pos = static_cast<size_t>(it - cpsSorted_.begin());
+  cpsSorted_.insert(it, cp);
+  slotForCp_.insert(slotForCp_.begin() + pos, newIdx);
+  return &glyphs_[newIdx];
+}
+
+const EpdGlyph* TtfEpdFont::missThunk(void* ctx, const uint32_t codepoint) {
+  return static_cast<TtfEpdFont*>(ctx)->faultGlyph(codepoint);
+}
+
+const uint8_t* TtfEpdFont::bitmapThunk(void* ctx, const EpdGlyph* glyph) {
+  if (glyph == nullptr || glyph->dataLength == 0) return nullptr;  // zero-width glyph
+  return static_cast<TtfEpdFont*>(ctx)->bmpArena_.data() + glyph->dataOffset;
+}
+
+bool TtfEpdFont::coverageThunk(void* ctx, const uint32_t codepoint) {
+  return static_cast<TtfEpdFont*>(ctx)->ttf_.hasGlyph(codepoint);
+}
+
+// --- Optional batch pre-warm --------------------------------------------------
+
+bool TtfEpdFont::build(const char* utf8) {
+  if (!loaded_) return false;
+  flushGlyphs();
+  return addCoverage(utf8);
+}
+
+bool TtfEpdFont::build(const std::deque<std::string>& words, const bool includeHyphen) {
+  if (!loaded_) return false;
+  flushGlyphs();
+  return addCoverage(words, includeHyphen);
+}
+
+bool TtfEpdFont::addCoverage(const char* utf8) {
+  if (!loaded_ || utf8 == nullptr) return false;
+  for (const char* p = utf8; *p != '\0';) faultGlyph(nextCodepoint(p));
   return true;
 }
 
-void TtfEpdFont::refreshData() {
-  // Coalesce sorted cps_ into intervals: getGlyph resolves
-  // glyph[interval.offset + (cp - interval.first)], and glyphs_ is cp-sorted.
-  intervals_.clear();
-  for (size_t i = 0; i < cps_.size();) {
-    size_t j = i;
-    while (j + 1 < cps_.size() && cps_[j + 1] == cps_[j] + 1) ++j;
-    EpdUnicodeInterval iv{};
-    iv.first = cps_[i];
-    iv.last = cps_[j];
-    iv.offset = static_cast<uint32_t>(i);
-    intervals_.push_back(iv);
-    i = j + 1;
-  }
-
-  const int ascent = ttf_.ascent(sizePx_);
-  const int lineHeight = ttf_.lineHeight(sizePx_);
-  data_ = EpdFontData{};
-  data_.bitmap = bmpArena_.empty() ? nullptr : bmpArena_.data();
-  data_.glyph = glyphs_.empty() ? nullptr : glyphs_.data();
-  data_.intervals = intervals_.empty() ? nullptr : intervals_.data();
-  data_.intervalCount = static_cast<uint32_t>(intervals_.size());
-  data_.advanceY = static_cast<uint8_t>(lineHeight > 255 ? 255 : (lineHeight < 0 ? 0 : lineHeight));
-  data_.ascender = ascent;
-  data_.descender = lineHeight - ascent > 0 ? lineHeight - ascent : 0;
-  data_.is2Bit = twoBit_;
-  ready_ = !glyphs_.empty();
-}
-
-bool TtfEpdFont::addCps(const std::vector<uint32_t>& want, const bool replace) {
+bool TtfEpdFont::addCoverage(const std::deque<std::string>& words, const bool includeHyphen) {
   if (!loaded_) return false;
-  if (replace) flushGlyphs();
-
-  bool overflow = false;
-  for (const uint32_t cp : want) {
-    if (!ensureGlyph(cp)) {
-      overflow = true;
-      break;
-    }
-  }
-  if (overflow) {
-    // Cache full: flush and rebuild from just this request, bounding memory to
-    // one request's glyphs. If the request itself exceeds the arena, add what
-    // fits (best effort — enlarge the cache via load() for very dense pages).
-    flushGlyphs();
-    for (const uint32_t cp : want) {
-      if (!ensureGlyph(cp)) break;
-    }
-  }
-  refreshData();
-  return ready_;
-}
-
-bool TtfEpdFont::build(const char* utf8, const bool twoBit) {
-  if (!loaded_ || utf8 == nullptr) return false;
-  twoBit_ = twoBit;
-  std::vector<uint32_t> want;
-  for (const char* p = utf8; *p != '\0';) {
-    const uint32_t cp = nextCodepoint(p);
-    if (cp != 0 && ttf_.hasGlyph(cp)) want.push_back(cp);
-  }
-  if (ttf_.hasGlyph(kReplacement)) want.push_back(kReplacement);
-  return addCps(want, /*replace=*/true);
-}
-
-bool TtfEpdFont::build(const std::deque<std::string>& words, const bool includeHyphen, const bool twoBit) {
-  if (!loaded_) return false;
-  twoBit_ = twoBit;
-  std::vector<uint32_t> want;
   for (const std::string& w : words) {
-    for (const char* p = w.c_str(); *p != '\0';) {
-      const uint32_t cp = nextCodepoint(p);
-      if (cp != 0 && ttf_.hasGlyph(cp)) want.push_back(cp);
-    }
+    for (const char* p = w.c_str(); *p != '\0';) faultGlyph(nextCodepoint(p));
   }
-  if (includeHyphen && ttf_.hasGlyph('-')) want.push_back('-');
-  if (ttf_.hasGlyph(kReplacement)) want.push_back(kReplacement);
-  return addCps(want, /*replace=*/true);
-}
-
-bool TtfEpdFont::addCoverage(const char* utf8, const bool twoBit) {
-  if (!loaded_ || utf8 == nullptr) return false;
-  twoBit_ = twoBit;
-  std::vector<uint32_t> want;
-  for (const char* p = utf8; *p != '\0';) {
-    const uint32_t cp = nextCodepoint(p);
-    if (cp != 0 && ttf_.hasGlyph(cp)) want.push_back(cp);
-  }
-  return addCps(want, /*replace=*/false);
-}
-
-bool TtfEpdFont::addCoverage(const std::deque<std::string>& words, const bool includeHyphen, const bool twoBit) {
-  if (!loaded_) return false;
-  twoBit_ = twoBit;
-  std::vector<uint32_t> want;
-  for (const std::string& w : words) {
-    for (const char* p = w.c_str(); *p != '\0';) {
-      const uint32_t cp = nextCodepoint(p);
-      if (cp != 0 && ttf_.hasGlyph(cp)) want.push_back(cp);
-    }
-  }
-  if (includeHyphen && ttf_.hasGlyph('-')) want.push_back('-');
-  return addCps(want, /*replace=*/false);
+  if (includeHyphen) faultGlyph('-');
+  return true;
 }
