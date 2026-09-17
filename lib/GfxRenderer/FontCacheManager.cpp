@@ -44,12 +44,18 @@ void FontCacheManager::clearCache() {
   for (auto& [id, font] : sdCardFonts_) {
     font->clearCache();
   }
+  for (auto& [id, font] : ttfFonts_) {
+    if (font) font->clearCache();
+  }
 }
 
 void FontCacheManager::releaseSdFontCaches() {
   if (fontDecompressor_) fontDecompressor_->clearCache();
   for (auto& [id, font] : sdCardFonts_) {
     font->releaseResidentCaches();
+  }
+  for (auto& [id, font] : ttfFonts_) {
+    if (font) font->releaseResidentCaches();
   }
 }
 

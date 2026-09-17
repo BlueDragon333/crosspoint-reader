@@ -87,12 +87,9 @@ void TtfEpdFont::initFace(Face& f) {
   } else {
     f.ready = f.ft.init(data_, len_, f.sizePx, f.weight, f.italic);
   }
-  if (f.ready) {
-    f.bmp.assign(f.cap, 0);  // allocate the cache only for a face that is actually used
-    f.glyphs.reserve(f.maxGlyphs);
-    f.cps.reserve(f.maxGlyphs);
-    f.slot.reserve(f.maxGlyphs);
-  }
+  // Caches are NOT pre-reserved: the byte arena (f.bmp) and the glyph tables
+  // grow on demand in faultGlyph and converge on the book's page needs (see the
+  // header's memory note). f.cap is only the hard ceiling that triggers a flush.
   setupFace(f);
 }
 
@@ -120,6 +117,38 @@ void TtfEpdFont::flushFace(Face& f) {
   f.used = 0;
 }
 
+void TtfEpdFont::clearCache() {
+  // Drop cached page glyphs on every inited face but keep the allocations: the
+  // vectors keep capacity (clear() does not free) and f.bmp keeps its buffer, so
+  // the next prewarm re-faults into buffers already sized to the book.
+  for (Face& f : faces_) {
+    if (f.inited) flushFace(f);
+  }
+}
+
+void TtfEpdFont::releaseResidentCaches() {
+  for (int i = 0; i < 4; ++i) {
+    Face& f = faces_[i];
+    // Actually RELEASE the caches (swap-with-empty frees capacity; clear() alone
+    // would not).
+    flushFace(f);
+    std::vector<uint8_t>().swap(f.bmp);
+    std::vector<EpdGlyph>().swap(f.glyphs);
+    std::vector<uint32_t>().swap(f.cps);
+    std::vector<uint16_t>().swap(f.slot);
+    // Keep the regular face's FreeType face live so coverage()/metrics still
+    // answer without a reload (mirrors SD keeping its interval table resident).
+    // Shed the lazy bold/italic/bold-italic faces entirely; they re-init on the
+    // next glyph fault for that style.
+    if (i == 0) continue;
+    if (f.inited) {
+      f.ft.deinit();
+      f.inited = false;
+      f.ready = false;
+    }
+  }
+}
+
 const EpdGlyph* TtfEpdFont::faultGlyph(Face& f, const uint32_t cp) {
   if (!f.inited) initFace(f);
   if (!f.ready || !f.ft.hasGlyph(cp)) return nullptr;
@@ -141,6 +170,10 @@ const EpdGlyph* TtfEpdFont::faultGlyph(Face& f, const uint32_t cp) {
   EpdGlyph eg{};
   eg.advanceX = static_cast<uint16_t>((advPx < 0 ? 0 : advPx) << 4);
   if (px && g && g->pixels) {
+    // Grow the byte arena on demand toward the book's page high-water mark.
+    // flush above guarantees f.used + bytes <= f.cap, so this never exceeds the
+    // ceiling; capacity is retained across page turns (clearCache keeps it).
+    if (f.bmp.size() < f.used + bytes) f.bmp.resize(f.used + bytes, 0);
     uint8_t* dst = f.bmp.data() + f.used;
     for (size_t i = 0; i < bytes; ++i) dst[i] = 0;
     for (uint32_t i = 0; i < px; ++i) {
