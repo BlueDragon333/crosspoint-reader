@@ -30,40 +30,87 @@ uint32_t nextCodepoint(const char*& p) {
 }
 }  // namespace
 
-bool TtfEpdFont::load(const uint8_t* ttfData, const uint32_t ttfLen, const uint16_t sizePx, const bool twoBit,
-                      const size_t glyphCacheBytes, const uint16_t maxGlyphs) {
-  streamed_ = false;
-  data_ = ttfData;
-  len_ = ttfLen;
-  if (data_ == nullptr || len_ == 0) return false;
-  return commonLoad(sizePx, twoBit, glyphCacheBytes, maxGlyphs);
+void TtfEpdFont::addResidentSource(const uint8_t style, const uint8_t* data, const uint32_t len) {
+  if (style >= 4 || data == nullptr || len == 0) return;
+  Source& s = sources_[style];
+  s = Source{};
+  s.present = true;
+  s.streamed = false;
+  s.data = data;
+  s.len = len;
 }
 
-bool TtfEpdFont::loadStream(const freeink::font::FtFont::ReadFn read, void* ctx, const unsigned long fileSize,
-                            const uint16_t sizePx, const bool twoBit, const size_t glyphCacheBytes,
-                            const uint16_t maxGlyphs) {
-  streamed_ = true;
-  read_ = read;
-  ctx_ = ctx;
-  fileSize_ = fileSize;
-  if (read_ == nullptr || fileSize_ == 0) return false;
-  return commonLoad(sizePx, twoBit, glyphCacheBytes, maxGlyphs);
+void TtfEpdFont::addStreamSource(const uint8_t style, const freeink::font::FtFont::ReadFn read, void* ctx,
+                                 const unsigned long fileSize) {
+  if (style >= 4 || read == nullptr || fileSize == 0) return;
+  Source& s = sources_[style];
+  s = Source{};
+  s.present = true;
+  s.streamed = true;
+  s.read = read;
+  s.ctx = ctx;
+  s.fileSize = fileSize;
 }
 
-bool TtfEpdFont::commonLoad(const uint16_t pointSize, const bool twoBit, const size_t glyphCacheBytes,
-                            const uint16_t maxGlyphs) {
+void TtfEpdFont::resolveFaces() {
+  // Map each style face onto the best available source. Regular (0) anchors the
+  // family; the others prefer an explicit file, then fall back to synthesizing
+  // from a related source (wght axis / faux bold for weight, ital axis / oblique
+  // for slant — all handled inside FtFont).
+  const bool haveB = sources_[Bold].present;
+  const bool haveI = sources_[Italic].present;
+  const bool haveBI = sources_[BoldItalic].present;
+
+  // regular
+  faces_[Regular].srcIndex = Regular;
+  faces_[Regular].weight = 400;
+  faces_[Regular].wantItalic = false;
+
+  // bold
+  faces_[Bold].srcIndex = haveB ? Bold : Regular;
+  faces_[Bold].weight = haveB ? 400 : 700;
+  faces_[Bold].wantItalic = false;
+
+  // italic
+  faces_[Italic].srcIndex = haveI ? Italic : Regular;
+  faces_[Italic].weight = 400;
+  faces_[Italic].wantItalic = !haveI;  // oblique/axis only when using the roman source
+
+  // bold-italic: dedicated file > bold-of-italic-file > italic-of-bold-file > roman
+  Face& bi = faces_[BoldItalic];
+  if (haveBI) {
+    bi.srcIndex = BoldItalic;
+    bi.weight = 400;
+    bi.wantItalic = false;
+  } else if (haveI) {
+    bi.srcIndex = Italic;
+    bi.weight = 700;  // wght axis / faux bold on the italic design
+    bi.wantItalic = false;
+  } else if (haveB) {
+    bi.srcIndex = Bold;
+    bi.weight = 400;
+    bi.wantItalic = true;  // oblique on the bold design
+  } else {
+    bi.srcIndex = Regular;
+    bi.weight = 700;
+    bi.wantItalic = true;
+  }
+}
+
+bool TtfEpdFont::load(const uint16_t pointSize, const bool twoBit, const size_t glyphCacheBytes,
+                      const uint16_t maxGlyphs) {
   loaded_ = false;
+  if (!sources_[Regular].present) return false;
   // CrossPoint speaks point-size-at-150-DPI (matching the .cpfont converter's
   // FT_Set_Char_Size(size, size, 150, 150)); FreeInkFont speaks pixels. Convert
   // so vector fonts match the on-glyph size and metrics of the bitmap fonts:
   //   ppem = pointSize * 150 / 72.
   const uint16_t sizePx = static_cast<uint16_t>((static_cast<uint32_t>(pointSize) * 150u + 36u) / 72u);
   sizePx_ = sizePx;
+  resolveFaces();
   for (int i = 0; i < 4; ++i) {
     Face& f = faces_[i];
     f.owner = this;
-    f.weight = (i & 1) ? 700 : 400;
-    f.italic = (i & 2) != 0;
     f.twoBit = twoBit;
     f.sizePx = sizePx;
     f.cap = glyphCacheBytes;
@@ -82,10 +129,13 @@ bool TtfEpdFont::commonLoad(const uint16_t pointSize, const bool twoBit, const s
 void TtfEpdFont::initFace(Face& f) {
   if (f.inited) return;
   f.inited = true;
-  if (streamed_) {
-    f.ready = f.ft.initStream(read_, ctx_, fileSize_, f.sizePx, f.weight, f.italic);
+  const Source& s = sources_[f.srcIndex];
+  if (!s.present) {
+    f.ready = false;
+  } else if (s.streamed) {
+    f.ready = f.ft.initStream(s.read, s.ctx, s.fileSize, f.sizePx, f.weight, f.wantItalic);
   } else {
-    f.ready = f.ft.init(data_, len_, f.sizePx, f.weight, f.italic);
+    f.ready = f.ft.init(s.data, s.len, f.sizePx, f.weight, f.wantItalic);
   }
   // Caches are NOT pre-reserved: the byte arena (f.bmp) and the glyph tables
   // grow on demand in faultGlyph and converge on the book's page needs (see the
@@ -132,10 +182,10 @@ void TtfEpdFont::releaseResidentCaches() {
     // Actually RELEASE the caches (swap-with-empty frees capacity; clear() alone
     // would not).
     flushFace(f);
-    std::vector<uint8_t>().swap(f.bmp);
-    std::vector<EpdGlyph>().swap(f.glyphs);
-    std::vector<uint32_t>().swap(f.cps);
-    std::vector<uint16_t>().swap(f.slot);
+    freeink::font::PsramVector<uint8_t>().swap(f.bmp);
+    freeink::font::PsramVector<EpdGlyph>().swap(f.glyphs);
+    freeink::font::PsramVector<uint32_t>().swap(f.cps);
+    freeink::font::PsramVector<uint16_t>().swap(f.slot);
     // Keep the regular face's FreeType face live so coverage()/metrics still
     // answer without a reload (mirrors SD keeping its interval table resident).
     // Shed the lazy bold/italic/bold-italic faces entirely; they re-init on the

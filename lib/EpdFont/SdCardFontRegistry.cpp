@@ -111,9 +111,30 @@ bool SdCardFontRegistry::parseVectorFontName(const char* filename, size_t& baseL
   return false;
 }
 
+uint8_t SdCardFontRegistry::parseVectorStyle(const char* baseName, size_t baseLen) {
+  // Case-insensitive token scan. "bold" (incl. semibold/demibold) → bold bit;
+  // "italic"/"oblique" → italic bit. Anything else is regular.
+  bool bold = false;
+  bool ital = false;
+  const size_t n = baseLen;
+  for (size_t i = 0; i < n; ++i) {
+    if ((n - i) >= 4 && strncasecmp(baseName + i, "bold", 4) == 0) bold = true;
+    if ((n - i) >= 6 && strncasecmp(baseName + i, "italic", 6) == 0) ital = true;
+    if ((n - i) >= 7 && strncasecmp(baseName + i, "oblique", 7) == 0) ital = true;
+  }
+  return static_cast<uint8_t>((bold ? 1 : 0) | (ital ? 2 : 0));
+}
+
 void SdCardFontRegistry::scanDirectory(const char* dirPath, SdCardFontFamilyInfo& family) {
   HalFile dir = Storage.open(dirPath);
   if (!dir || !dir.isDirectory()) return;
+
+  // Collect .cpfont and vector (.ttf/.otf/.ttc) candidates separately in one
+  // pass (the dir handle is forward-only), then commit whichever kind the folder
+  // holds. .cpfont wins if a folder somehow contains both, since a pre-rasterized
+  // bitmap family is the more specific artifact.
+  std::vector<SdCardFontFileInfo> cpfontFiles;
+  std::vector<SdCardFontFileInfo> vectorFiles;
 
   char nameBuffer[128];
   while (true) {
@@ -131,29 +152,59 @@ void SdCardFontRegistry::scanDirectory(const char* dirPath, SdCardFontFamilyInfo
     if (nameBuffer[0] == '.' || nameBuffer[0] == '_') continue;
 
     uint8_t size, style;
-    if (!parseFilename(nameBuffer, size, style)) continue;
-
-    // Reject duplicate (pointSize, style) entries in the same family. With
-    // v4's bundle-everything design parseFilename always returns style=0, so
-    // two files at the same size in the same family would silently shadow
-    // each other in findFile(). Skip the duplicate and warn.
-    bool duplicate = false;
-    for (const auto& existing : family.files) {
-      if (existing.pointSize == size && existing.style == style) {
-        duplicate = true;
-        break;
+    if (parseFilename(nameBuffer, size, style)) {
+      // .cpfont: reject duplicate (pointSize, style) — style is always 0 in v4,
+      // so two files at the same size would silently shadow each other.
+      bool duplicate = false;
+      for (const auto& existing : cpfontFiles) {
+        if (existing.pointSize == size && existing.style == style) {
+          duplicate = true;
+          break;
+        }
       }
-    }
-    if (duplicate) {
-      LOG_ERR("SDREG", "Duplicate font %s in %s — skipping", nameBuffer, dirPath);
+      if (duplicate) {
+        LOG_ERR("SDREG", "Duplicate font %s in %s — skipping", nameBuffer, dirPath);
+        continue;
+      }
+      SdCardFontFileInfo info;
+      info.path = std::string(dirPath) + "/" + nameBuffer;
+      info.pointSize = size;
+      info.style = style;
+      cpfontFiles.push_back(std::move(info));
       continue;
     }
 
-    SdCardFontFileInfo info;
-    info.path = std::string(dirPath) + "/" + nameBuffer;
-    info.pointSize = size;
-    info.style = style;
-    family.files.push_back(std::move(info));
+    size_t baseLen = 0;
+    if (parseVectorFontName(nameBuffer, baseLen)) {
+      // Vector file in a family folder: its style role comes from the filename.
+      // e.g. Merriweather/Merriweather-Italic.ttf → italic. Dedup by role.
+      const uint8_t role = parseVectorStyle(nameBuffer, baseLen);
+      bool duplicate = false;
+      for (const auto& existing : vectorFiles) {
+        if (existing.style == role) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) {
+        LOG_ERR("SDREG", "Duplicate %s style in %s (%s) — skipping", role == 0 ? "regular" : "styled", dirPath,
+                nameBuffer);
+        continue;
+      }
+      SdCardFontFileInfo info;
+      info.path = std::string(dirPath) + "/" + nameBuffer;
+      info.pointSize = 0;  // size-free
+      info.style = role;
+      vectorFiles.push_back(std::move(info));
+    }
+  }
+
+  if (!cpfontFiles.empty()) {
+    family.vector = false;
+    family.files = std::move(cpfontFiles);
+  } else if (!vectorFiles.empty()) {
+    family.vector = true;
+    family.files = std::move(vectorFiles);
   }
 }
 

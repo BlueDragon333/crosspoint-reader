@@ -1,5 +1,6 @@
 #pragma once
 
+#include <FontPsram.h>  // PsramVector for resident TTF bytes
 #include <HalStorage.h>  // HalFile (kept open for streamed TTFs)
 #include <SdCardFontManager.h>
 #include <SdCardFontRegistry.h>
@@ -75,25 +76,40 @@ class SdCardFontSystem {
   // text (book titles, list rows, menus, status bar) in scripts the built-in
   // fonts lack renders in the chosen TTF. Mirrors setupUiFallbacks for .cpfont.
   void setupTtfUiFallbacks(GfxRenderer& renderer);
-  // FreeType stream io: reads the open ttfFile_ at an absolute offset on demand.
+  // FreeType stream io: reads a source's open file at an absolute offset (ctx is
+  // a HalFile*).
   static unsigned long ttfRead(void* ctx, unsigned long offset, unsigned char* buffer, unsigned long count);
+  // Open one style source file (resident if small, streamed if large) into
+  // ttfSources_[style]. Returns false on open/read failure.
+  bool openTtfSource(uint8_t style, const std::string& path);
+  // Register every present source with `font` (shared bytes / file handles).
+  void addTtfSources(TtfEpdFont& font);
+  // Close/free all style sources.
+  void freeTtfSources();
 
   SdCardFontRegistry registry_;
   SdCardFontManager manager_;
   std::atomic<bool> registryDirty_{false};
 
-  // Active TTF font (at most one reader-size vector font loaded at a time).
+  // One style source file. SMALL files are read fully into `bytes` (resident,
+  // PSRAM when present); LARGE files stream from `file` (kept open) so a multi-MB
+  // file never sits in RAM. All faces (reader + UI sizes) share these sources.
+  struct TtfSource {
+    freeink::font::PsramVector<uint8_t> bytes;  // resident form (empty if streamed)
+    HalFile file;                                // open handle (streamed form)
+    bool streamed = false;
+    unsigned long size = 0;
+    bool present = false;
+  };
+
+  // Active TTF font (at most one reader-size vector family loaded at a time).
   std::unique_ptr<TtfEpdFont> ttf_;
-  // Source: SMALL fonts are read fully into ttfBytes_ (resident, fast); LARGE
-  // fonts stream from ttfFile_ (kept open) so the multi-MB file never sits in RAM.
-  std::vector<uint8_t> ttfBytes_;
-  HalFile ttfFile_;                 // open handle for the streamed path
-  bool ttfStreamed_ = false;
-  unsigned long ttfFileSize_ = 0;
+  // Up to 4 style sources: 0=regular (required), 1=bold, 2=italic, 3=bold-italic.
+  TtfSource ttfSources_[4];
   std::string ttfFamily_;           // loaded vector family name ("" = none)
   int ttfFontId_ = 0;               // renderer font id for ttf_ (0 = none)
   uint8_t ttfPointSize_ = 0;        // size ttf_ was built at
-  // UI-size TTF fallbacks (share ttfBytes_); parallel to their renderer font ids.
+  // UI-size TTF fallbacks (share ttfSources_); parallel to their renderer font ids.
   std::vector<std::unique_ptr<TtfEpdFont>> ttfUi_;
   std::vector<int> ttfUiIds_;
 };

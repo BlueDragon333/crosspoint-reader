@@ -8,9 +8,11 @@ struct SdCardFontFileInfo {
   std::string path;   // v4 on-disk naming: "/<root>/<Family>/<Family>_<size>.cpfont"
                       // where <root> is "/.fonts" (preferred, hidden) or "/fonts" (visible).
                       // e.g. "/.fonts/NotoSansCJK/NotoSansCJK_14.cpfont"
-  uint8_t pointSize;  // parsed from filename: 14
-  uint8_t style;      // always 0 in v4 (all 4 styles bundled in one file);
-                      // kept for potential future formats
+  uint8_t pointSize;  // parsed from filename: 14 (0 for size-free vector fonts)
+  uint8_t style;      // .cpfont: always 0 (all 4 styles bundled in one file).
+                      // Vector family in a folder: the style ROLE of this file —
+                      // 0=regular, 1=bold, 2=italic, 3=bold-italic (parsed from
+                      // the filename). A loose vector file is always role 0.
 };
 
 struct SdCardFontFamilyInfo {
@@ -63,6 +65,9 @@ class SdCardFontRegistry {
   // Match a loose vector font filename (.ttf/.otf/.ttc, case-insensitive) and
   // return the length of the base name (extension stripped) in `baseLen`.
   static bool parseVectorFontName(const char* filename, size_t& baseLen);
+  // Style role (0=regular, 1=bold, 2=italic, 3=bold-italic) inferred from a
+  // vector font's base name (case-insensitive "bold"/"italic"/"oblique" tokens).
+  static uint8_t parseVectorStyle(const char* baseName, size_t baseLen);
   static void scanDirectory(const char* dirPath, SdCardFontFamilyInfo& family);
   // Scan one root (e.g. "/.fonts"), append families to `out`, dedup by name.
   static void scanRoot(const char* rootPath, std::vector<SdCardFontFamilyInfo>& out);

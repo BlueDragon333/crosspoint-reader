@@ -2,36 +2,48 @@
 
 // CrossPoint <- FreeInkFont adapter (FreeType, 4-style, lazy, streaming).
 //
-// Renders a TrueType/OpenType file — including OpenType VARIABLE fonts — as a
-// CrossPoint EpdFontFamily with real regular / bold / italic / bold-italic
-// (bold = wght axis; italic = ital/slnt axis or oblique shear) via the
-// FreeInkFont FreeType backend.
+// Renders one or more TrueType/OpenType files — including OpenType VARIABLE
+// fonts — as a CrossPoint EpdFontFamily with regular / bold / italic /
+// bold-italic via the FreeInkFont FreeType backend.
+//
+// STYLE SOURCES. A family can be built from up to four source files, one per
+// style role (0=regular, 1=bold, 2=italic, 3=bold-italic); only regular is
+// required. Each face resolves to the best available source:
+//   * an explicit file for that style, if supplied (e.g. a separate
+//     Family-Italic.ttf → true italic letterforms, or a static Family-Bold.ttf);
+//   * else the regular source with the wght axis pushed to bold (variable
+//     fonts) or a per-glyph outline embolden (static) for bold;
+//   * else the regular source with an ital/slnt axis or an oblique shear for
+//     italic. Bold-italic combines the two, preferring an italic source's bold.
+// So a single variable file yields all four styles, and dropping in dedicated
+// Bold/Italic files upgrades those styles to the real designs.
 //
 // Memory-lean:
-//   * STREAMING (loadStream) — FreeType pulls bytes from SD on demand, so a
-//     multi-MB variable/CJK file never sits in RAM (only the tables + glyphs
-//     used). Use load() only for small fonts you already hold in RAM.
+//   * STREAMING (addStreamSource) — FreeType pulls bytes from SD on demand, so a
+//     multi-MB variable/CJK file never sits in RAM. Use addResidentSource() only
+//     for small fonts already held in RAM.
 //   * LAZY per-style faces — only the regular face is built up front; bold /
-//     italic / bold-italic (and their glyph caches) are created on first use,
-//     so a book with no bold pays nothing for it, and UI fallbacks that only
-//     draw regular cost one face.
+//     italic / bold-italic (and their glyph caches) are created on first use, so
+//     a book with no bold pays nothing for it.
 //   * per-face glyph caches that GROW TO CONVERGE (no worst-case pre-reserve):
 //     the byte arena and glyph tables start empty and grow only to the book's
 //     actual page needs, then stop touching the allocator (clearCache keeps the
 //     capacity across page turns). Bounded by a hard byte cap that flushes when
 //     full, and shed entirely by releaseResidentCaches() on heap-critical
 //     transitions — on par with the SD (.cpfont) font system's discipline.
+//   * caches live in PSRAM when the board has it (FontPsram / FontAlloc), so
+//     glyph arenas don't consume scarce internal SRAM.
 //
-// Lifetime: for load(), the bytes are borrowed; for loadStream(), the read
-// source (e.g. an open SD file) is borrowed. Either must outlive this object,
-// which must outlive any GfxRenderer registration.
+// Lifetime: every configured source (resident bytes or streamed read source,
+// e.g. an open SD file) is BORROWED and must outlive this object, which must
+// outlive any GfxRenderer registration.
 
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <string>
-#include <vector>
 
+#include <FontPsram.h>
 #include <FtFont.h>
 
 #include "EpdFont.h"
@@ -40,12 +52,18 @@
 
 class TtfEpdFont {
  public:
-  // Resident source (small fonts held in RAM). Bytes borrowed.
-  bool load(const uint8_t* ttfData, uint32_t ttfLen, uint16_t sizePx, bool twoBit = true,
-            size_t glyphCacheBytes = 32 * 1024, uint16_t maxGlyphs = 768);
-  // Streamed source (big fonts): FreeType reads via `read`/`ctx` (source borrowed).
-  bool loadStream(freeink::font::FtFont::ReadFn read, void* ctx, unsigned long fileSize, uint16_t sizePx,
-                  bool twoBit = true, size_t glyphCacheBytes = 32 * 1024, uint16_t maxGlyphs = 768);
+  // Style roles for source slots.
+  enum Style : uint8_t { Regular = 0, Bold = 1, Italic = 2, BoldItalic = 3 };
+
+  // Configure a source file for a style role BEFORE calling load(). Regular is
+  // required; the rest are optional and upgrade their style to a real design.
+  // Resident: bytes borrowed. Streamed: read source borrowed.
+  void addResidentSource(uint8_t style, const uint8_t* data, uint32_t len);
+  void addStreamSource(uint8_t style, freeink::font::FtFont::ReadFn read, void* ctx, unsigned long fileSize);
+
+  // Build the family at the given reader point size from the configured sources.
+  // Returns false if the regular source is missing or unparseable.
+  bool load(uint16_t pointSize, bool twoBit = true, size_t glyphCacheBytes = 32 * 1024, uint16_t maxGlyphs = 768);
 
   bool ready() const { return loaded_; }
   uint16_t sizePx() const { return sizePx_; }
@@ -75,22 +93,34 @@ class TtfEpdFont {
   bool addCoverage(const std::deque<std::string>& words, bool includeHyphen);
 
  private:
+  // A borrowed source file (one per style role that the caller supplies).
+  struct Source {
+    bool present = false;
+    bool streamed = false;
+    const uint8_t* data = nullptr;  // resident form
+    uint32_t len = 0;
+    freeink::font::FtFont::ReadFn read = nullptr;  // streamed form
+    void* ctx = nullptr;
+    unsigned long fileSize = 0;
+  };
+
   struct Face {
     TtfEpdFont* owner = nullptr;
     freeink::font::FtFont ft;
-    std::vector<uint8_t> bmp;
+    freeink::font::PsramVector<uint8_t> bmp;
     size_t used = 0;
     size_t cap = 0;
     uint16_t maxGlyphs = 0;
     bool twoBit = true;
     uint16_t sizePx = 0;
-    int weight = 400;
-    bool italic = false;
-    bool inited = false;  // init attempted (lazy)
-    bool ready = false;   // FreeType face live
-    std::vector<EpdGlyph> glyphs;
-    std::vector<uint32_t> cps;
-    std::vector<uint16_t> slot;
+    uint8_t srcIndex = 0;    // which Source this face initializes from
+    int weight = 400;        // design weight requested (wght axis / faux bold)
+    bool wantItalic = false;  // request italic from the source (axis or oblique)
+    bool inited = false;     // init attempted (lazy)
+    bool ready = false;      // FreeType face live
+    freeink::font::PsramVector<EpdGlyph> glyphs;
+    freeink::font::PsramVector<uint32_t> cps;
+    freeink::font::PsramVector<uint16_t> slot;
     EpdFontData data{};
     EpdFont font{&data};
   };
@@ -99,21 +129,14 @@ class TtfEpdFont {
   static const uint8_t* bitmapThunk(void* ctx, const EpdGlyph* glyph);
   static bool coverageThunk(void* ctx, uint32_t codepoint);
 
-  bool commonLoad(uint16_t sizePx, bool twoBit, size_t glyphCacheBytes, uint16_t maxGlyphs);
-  void initFace(Face& f);       // lazy: create the FT face + caches on first use
+  void resolveFaces();          // map the 4 faces onto the configured sources
+  void initFace(Face& f);       // lazy: create the FT face on first use
   void setupFace(Face& f);      // wire data handlers + metrics
   const EpdGlyph* faultGlyph(Face& f, uint32_t codepoint);
   static void flushFace(Face& f);
 
-  // Source (one of the two forms).
-  bool streamed_ = false;
-  const uint8_t* data_ = nullptr;
-  uint32_t len_ = 0;
-  freeink::font::FtFont::ReadFn read_ = nullptr;
-  void* ctx_ = nullptr;
-  unsigned long fileSize_ = 0;
-
-  Face faces_[4];  // 0=regular 1=bold 2=italic 3=bold-italic
+  Source sources_[4];  // indexed by Style role
+  Face faces_[4];      // 0=regular 1=bold 2=italic 3=bold-italic
   uint16_t sizePx_ = 0;
   bool loaded_ = false;
 };

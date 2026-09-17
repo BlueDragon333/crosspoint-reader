@@ -226,9 +226,20 @@ int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*pointSize*
   return manager_.getFontId(familyName);
 }
 
+void SdCardFontSystem::freeTtfSources() {
+  for (auto& s : ttfSources_) {
+    s.bytes.clear();
+    freeink::font::PsramVector<uint8_t>().swap(s.bytes);  // actually release
+    if (s.file) s.file.close();
+    s.streamed = false;
+    s.size = 0;
+    s.present = false;
+  }
+}
+
 void SdCardFontSystem::unloadTtf(GfxRenderer& renderer) {
   if (ttfFamily_.empty() && ttfFontId_ == 0 && ttfUiIds_.empty()) return;
-  // UI-size fallbacks first (they borrow ttfBytes_).
+  // UI-size fallbacks first (they borrow ttfSources_).
   for (const int id : ttfUiIds_) {
     renderer.unregisterTtfFont(id);
     renderer.removeFont(id);
@@ -240,12 +251,8 @@ void SdCardFontSystem::unloadTtf(GfxRenderer& renderer) {
     renderer.unregisterTtfFont(ttfFontId_);
     renderer.removeFont(ttfFontId_);  // drop from the renderer's fontMap
   }
-  ttf_.reset();  // frees the FT faces first (they read ttfFile_ / ttfBytes_)
-  ttfBytes_.clear();
-  ttfBytes_.shrink_to_fit();
-  if (ttfFile_) ttfFile_.close();
-  ttfStreamed_ = false;
-  ttfFileSize_ = 0;
+  ttf_.reset();  // frees the FT faces first (they read ttfSources_)
+  freeTtfSources();
   ttfFamily_.clear();
   ttfFontId_ = 0;
   ttfPointSize_ = 0;
@@ -259,22 +266,66 @@ unsigned long SdCardFontSystem::ttfRead(void* ctx, unsigned long offset, unsigne
   return n < 0 ? 0 : static_cast<unsigned long>(n);
 }
 
+bool SdCardFontSystem::openTtfSource(const uint8_t style, const std::string& path) {
+  if (style >= 4) return false;
+  // Small fonts are read fully into RAM (fastest, fewest SD reads; PSRAM when
+  // present). Large fonts (e.g. multi-MB variable/CJK) STREAM from SD so the
+  // whole file never sits in RAM — the handle is kept open for the font's life.
+  static constexpr size_t kResidentMax = 1024 * 1024;
+  HalFile f = Storage.open(path.c_str());
+  if (!f) {
+    LOG_ERR("SDFS", "Failed to open TTF: %s", path.c_str());
+    return false;
+  }
+  const size_t len = f.size();
+  if (len == 0) {
+    LOG_ERR("SDFS", "Empty TTF: %s", path.c_str());
+    f.close();
+    return false;
+  }
+  TtfSource& s = ttfSources_[style];
+  if (len <= kResidentMax) {
+    s.bytes.resize(len);
+    const int got = f.read(s.bytes.data(), len);
+    f.close();
+    if (static_cast<size_t>(got) != len) {
+      LOG_ERR("SDFS", "Short read on TTF %s (%d/%u)", path.c_str(), got, static_cast<unsigned>(len));
+      s.bytes.clear();
+      return false;
+    }
+    s.streamed = false;
+  } else {
+    s.file = std::move(f);  // kept open; ttfRead() reads it on demand
+    s.streamed = true;
+    LOG_DBG("SDFS", "Streaming TTF %s (%u KB) from SD", path.c_str(), static_cast<unsigned>(len / 1024));
+  }
+  s.size = static_cast<unsigned long>(len);
+  s.present = true;
+  return true;
+}
+
+void SdCardFontSystem::addTtfSources(TtfEpdFont& font) {
+  for (uint8_t st = 0; st < 4; ++st) {
+    TtfSource& s = ttfSources_[st];
+    if (!s.present) continue;
+    if (s.streamed) {
+      font.addStreamSource(st, &SdCardFontSystem::ttfRead, &s.file, s.size);
+    } else {
+      font.addResidentSource(st, s.bytes.data(), static_cast<uint32_t>(s.bytes.size()));
+    }
+  }
+}
+
 void SdCardFontSystem::setupTtfUiFallbacks(GfxRenderer& renderer) {
   if (ttfFamily_.empty()) return;
   // Small caches: UI strings (titles/rows) are short. Each UI family is 4-style
   // but LAZY, so only the regular face is ever built for UI text — the bold/
-  // italic faces cost nothing. All faces share the reader's source (streamed
-  // ttfFile_ or resident ttfBytes_), so no extra copy of the font.
+  // italic faces cost nothing. All faces share the reader's sources (streamed
+  // handles or resident bytes), so no extra copy of any font file.
   for (const auto& ui : kUiFontSizes) {
     auto f = std::unique_ptr<TtfEpdFont>(new TtfEpdFont());
-    bool ok;
-    if (ttfStreamed_) {
-      ok = f->loadStream(&SdCardFontSystem::ttfRead, &ttfFile_, ttfFileSize_, ui.pointSize, /*twoBit=*/true,
-                         /*glyphCacheBytes=*/16 * 1024, /*maxGlyphs=*/384);
-    } else {
-      ok = f->load(ttfBytes_.data(), static_cast<uint32_t>(ttfBytes_.size()), ui.pointSize, /*twoBit=*/true,
-                   /*glyphCacheBytes=*/16 * 1024, /*maxGlyphs=*/384);
-    }
+    addTtfSources(*f);
+    const bool ok = f->load(ui.pointSize, /*twoBit=*/true, /*glyphCacheBytes=*/16 * 1024, /*maxGlyphs=*/384);
     if (!ok) continue;
     // Distinct id from the reader-size font: a UI size can equal the reader size
     // (e.g. both 12pt), which would collide on computeTtfFontId and be dropped
@@ -305,55 +356,30 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
     SETTINGS.clearSdFontFamily();
     return;
   }
-  const std::string& path = family.files.front().path;
 
-  HalFile f = Storage.open(path.c_str());
-  if (!f) {
-    LOG_ERR("SDFS", "Failed to open TTF: %s (clearing)", path.c_str());
+  // Open each style source the family ships (0=regular, 1=bold, 2=italic,
+  // 3=bold-italic). A single-file family (loose .ttf, or a folder with one file)
+  // supplies only regular; TtfEpdFont then derives bold/italic from the wght axis
+  // or an oblique shear. Extra files upgrade those styles to the real designs.
+  for (const auto& file : family.files) {
+    const uint8_t role = file.style < 4 ? file.style : 0;
+    if (ttfSources_[role].present) continue;  // registry already deduped by role
+    openTtfSource(role, file.path);
+  }
+  if (!ttfSources_[0].present) {
+    LOG_ERR("SDFS", "Vector family %s has no regular file (clearing)", family.name.c_str());
+    freeTtfSources();
     SETTINGS.clearSdFontFamily();
     return;
   }
-  const size_t len = f.size();
-  if (len == 0) {
-    LOG_ERR("SDFS", "Empty TTF: %s (clearing)", path.c_str());
-    f.close();
-    SETTINGS.clearSdFontFamily();
-    return;
-  }
 
-  // Small fonts are read fully into RAM (fastest, fewest SD reads). Large fonts
-  // (e.g. multi-MB variable/CJK) STREAM from SD: FreeType pulls only the tables
-  // and glyphs it needs, so the whole file never sits in RAM. Keep the file
-  // handle open for the font's lifetime in that case.
-  static constexpr size_t kResidentMax = 1024 * 1024;
   ttf_.reset(new TtfEpdFont());
-  bool ok;
-  if (len <= kResidentMax) {
-    ttfBytes_.resize(len);
-    const int got = f.read(ttfBytes_.data(), len);
-    f.close();
-    if (static_cast<size_t>(got) != len) {
-      LOG_ERR("SDFS", "Short read on TTF %s (%d/%u)", path.c_str(), got, static_cast<unsigned>(len));
-      ttfBytes_.clear();
-      ttf_.reset();
-      SETTINGS.clearSdFontFamily();
-      return;
-    }
-    ttfStreamed_ = false;
-    ok = ttf_->load(ttfBytes_.data(), static_cast<uint32_t>(len), size);
-  } else {
-    ttfFile_ = std::move(f);  // kept open; ttfRead() reads it on demand
-    ttfStreamed_ = true;
-    ttfFileSize_ = static_cast<unsigned long>(len);
-    ok = ttf_->loadStream(&SdCardFontSystem::ttfRead, &ttfFile_, ttfFileSize_, size);
-    LOG_DBG("SDFS", "Streaming TTF %s (%u KB) from SD", family.name.c_str(), static_cast<unsigned>(len / 1024));
-  }
+  addTtfSources(*ttf_);
+  const bool ok = ttf_->load(size);
   if (!ok) {
     LOG_ERR("SDFS", "FreeInkFont could not parse %s (clearing)", family.name.c_str());
     ttf_.reset();
-    ttfBytes_.clear();
-    if (ttfFile_) ttfFile_.close();
-    ttfStreamed_ = false;
+    freeTtfSources();
     SETTINGS.clearSdFontFamily();
     return;
   }
