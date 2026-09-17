@@ -50,9 +50,14 @@ bool TtfEpdFont::loadStream(const freeink::font::FtFont::ReadFn read, void* ctx,
   return commonLoad(sizePx, twoBit, glyphCacheBytes, maxGlyphs);
 }
 
-bool TtfEpdFont::commonLoad(const uint16_t sizePx, const bool twoBit, const size_t glyphCacheBytes,
+bool TtfEpdFont::commonLoad(const uint16_t pointSize, const bool twoBit, const size_t glyphCacheBytes,
                             const uint16_t maxGlyphs) {
   loaded_ = false;
+  // CrossPoint speaks point-size-at-150-DPI (matching the .cpfont converter's
+  // FT_Set_Char_Size(size, size, 150, 150)); FreeInkFont speaks pixels. Convert
+  // so vector fonts match the on-glyph size and metrics of the bitmap fonts:
+  //   ppem = pointSize * 150 / 72.
+  const uint16_t sizePx = static_cast<uint16_t>((static_cast<uint32_t>(pointSize) * 150u + 36u) / 72u);
   sizePx_ = sizePx;
   for (int i = 0; i < 4; ++i) {
     Face& f = faces_[i];
@@ -150,7 +155,10 @@ const EpdGlyph* TtfEpdFont::faultGlyph(Face& f, const uint32_t cp) {
     eg.width = static_cast<uint8_t>(g->width);
     eg.height = static_cast<uint8_t>(g->height);
     eg.left = g->xoff;
-    eg.top = g->yoff;
+    // FreeInkFont's yoff is negative-above (top offset from baseline); CrossPoint's
+    // EpdGlyph.top is positive-above (renderer computes screen Y = cursorY - top,
+    // matching the .cpfont converter's top = FreeType bitmap_top). Flip the sign.
+    eg.top = static_cast<int16_t>(-g->yoff);
     eg.dataOffset = static_cast<uint32_t>(f.used);
     eg.dataLength = static_cast<uint16_t>(bytes);
     f.used += bytes;
