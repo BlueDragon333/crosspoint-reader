@@ -4,14 +4,23 @@
 #include <SdCardFontRegistry.h>
 
 #include <atomic>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
 class GfxRenderer;
+class TtfEpdFont;
 
 /// Facade that owns the SD card font registry, manager, and resolver logic.
 /// Hides implementation details behind a single begin() + ensureLoaded() API.
 class SdCardFontSystem {
  public:
-  SdCardFontSystem() = default;
+  // Constructor and destructor are out-of-line (defined in the .cpp where
+  // TtfEpdFont is a complete type) so the std::unique_ptr<TtfEpdFont> member
+  // can be constructed/destroyed with only a forward declaration visible here.
+  SdCardFontSystem();
+  ~SdCardFontSystem();
   SdCardFontSystem(const SdCardFontSystem&) = delete;
   SdCardFontSystem& operator=(const SdCardFontSystem&) = delete;
   /// Discover SD card fonts and load user's saved selection. Call once during setup.
@@ -54,9 +63,31 @@ class SdCardFontSystem {
   // reused).
   void setupUiFallbacks(GfxRenderer& renderer);
 
+  // --- Vector (.ttf/.otf) font path (FreeInkFont via TtfEpdFont) -------------
+  // Load/refresh the selected TTF family at the current reader size, register
+  // it with the renderer, and track it so ensureSdCardFontReady() rebuilds its
+  // glyph set per page. registryWasDirty forces a reload even if unchanged.
+  void loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRenderer& renderer, bool registryWasDirty);
+  // Unregister + free the active TTF font (and its UI-size fallbacks), if any.
+  void unloadTtf(GfxRenderer& renderer);
+  // Register the loaded TTF at each built-in UI size as a script fallback, so UI
+  // text (book titles, list rows, menus, status bar) in scripts the built-in
+  // fonts lack renders in the chosen TTF. Mirrors setupUiFallbacks for .cpfont.
+  void setupTtfUiFallbacks(GfxRenderer& renderer);
+
   SdCardFontRegistry registry_;
   SdCardFontManager manager_;
   std::atomic<bool> registryDirty_{false};
+
+  // Active TTF font (at most one reader-size vector font loaded at a time).
+  std::unique_ptr<TtfEpdFont> ttf_;
+  std::vector<uint8_t> ttfBytes_;   // resident font file bytes (borrowed by ttf_ + UI fallbacks)
+  std::string ttfFamily_;           // loaded vector family name ("" = none)
+  int ttfFontId_ = 0;               // renderer font id for ttf_ (0 = none)
+  uint8_t ttfPointSize_ = 0;        // size ttf_ was built at
+  // UI-size TTF fallbacks (share ttfBytes_); parallel to their renderer font ids.
+  std::vector<std::unique_ptr<TtfEpdFont>> ttfUi_;
+  std::vector<int> ttfUiIds_;
 };
 
 // Global SD card font system instance (defined in main.cpp).

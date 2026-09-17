@@ -3,6 +3,7 @@
 #include <FontDecompressor.h>
 #include <Logging.h>
 #include <SdCardFont.h>
+#include <TtfEpdFont.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -32,8 +33,9 @@ char* appendUtf8Codepoint(char* output, const uint32_t codepoint) {
 }  // namespace
 
 FontCacheManager::FontCacheManager(const std::map<int, EpdFontFamily>& fontMap,
-                                   const std::map<int, SdCardFont*>& sdCardFonts)
-    : fontMap_(fontMap), sdCardFonts_(sdCardFonts) {}
+                                   const std::map<int, SdCardFont*>& sdCardFonts,
+                                   const std::map<int, TtfEpdFont*>& ttfFonts)
+    : fontMap_(fontMap), sdCardFonts_(sdCardFonts), ttfFonts_(ttfFonts) {}
 
 void FontCacheManager::setFontDecompressor(FontDecompressor* d) { fontDecompressor_ = d; }
 
@@ -52,6 +54,21 @@ void FontCacheManager::releaseSdFontCaches() {
 }
 
 void FontCacheManager::prewarmCache(int fontId, const char* utf8Text, uint8_t styleMask, bool accumulate) {
+  // TTF (vector) font prewarm path. This is the single dispatch every draw path
+  // funnels through (reader endScanAndPrewarm, the settings preview, UI text),
+  // so building here covers them all. accumulate=false means "this is the whole
+  // glyph set for this render" → replace; accumulate=true → add incrementally.
+  // styleMask is ignored: a TTF face has no synthesized bold/italic here.
+  auto tit = ttfFonts_.find(fontId);
+  if (tit != ttfFonts_.end() && tit->second) {
+    if (accumulate) {
+      tit->second->addCoverage(utf8Text);
+    } else {
+      tit->second->build(utf8Text);
+    }
+    return;
+  }
+
   // SD card font prewarm path: prewarm all requested styles in one call
   auto it = sdCardFonts_.find(fontId);
   if (it != sdCardFonts_.end()) {

@@ -7,6 +7,7 @@
 #include <HalGPIO.h>
 #include <Logging.h>
 #include <SdCardFont.h>
+#include <TtfEpdFont.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -96,6 +97,18 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_
     if (missed > 0) {
       LOG_DBG("GFX", "ensureSdCardFontReady: %d glyph(s) not found", missed);
     }
+    return;
+  }
+  // TTF (vector) font: rebuild the eager per-page glyph set for this text (plus
+  // any shaped RTL presentation forms). See TtfEpdFont.
+  auto tit = ttfFonts_.find(fontId);
+  if (tit != ttfFonts_.end() && tit->second) {
+    // Accumulate: layout visits every paragraph before the page is drawn, so
+    // the drawn glyphs are all resident by render time (see TtfEpdFont).
+    tit->second->addCoverage(utf8Text);
+    std::string shaped;
+    appendShapedRtlTokens(utf8Text, shaped);
+    if (!shaped.empty()) tit->second->addCoverage(shaped.c_str());
   }
 }
 
@@ -115,6 +128,15 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const std::deque<std::string
     if (missed > 0) {
       LOG_DBG("GFX", "ensureSdCardFontReady: %d glyph(s) not found", missed);
     }
+    return;
+  }
+  // TTF (vector) font: rebuild the eager per-page glyph set from the word list.
+  auto tit = ttfFonts_.find(fontId);
+  if (tit != ttfFonts_.end() && tit->second) {
+    tit->second->addCoverage(words, includeHyphen);
+    std::string shaped;
+    for (const auto& w : words) appendShapedRtlTokens(w.c_str(), shaped);
+    if (!shaped.empty()) tit->second->addCoverage(shaped.c_str());
   }
 }
 

@@ -1,13 +1,40 @@
 #include "SdCardFontSystem.h"
 
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <Logging.h>
+#include <TtfEpdFont.h>
 
 #include <iterator>
 
 #include "CrossPointSettings.h"
 #include "ReaderFontSizes.h"
 #include "fontIds.h"
+
+namespace {
+
+// Stable, non-zero renderer font id for a vector family at a size (FNV-1a of
+// name + size). 0 is the "not found" sentinel, so bump collisions to 1.
+int computeTtfFontId(const char* familyName, uint8_t pointSize) {
+  uint32_t hash = 2166136261u;
+  for (const char* p = familyName; p && *p; ++p) {
+    hash ^= static_cast<uint8_t>(*p);
+    hash *= 16777619u;
+  }
+  hash ^= pointSize;
+  hash *= 16777619u;
+  hash ^= 0x54544600u;  // "TTF\0" salt to avoid colliding with cpfont ids
+  const int id = static_cast<int>(hash);
+  return id != 0 ? id : 1;
+}
+
+}  // namespace (helper)
+
+// Out-of-line ctor/dtor: TtfEpdFont is complete here, so unique_ptr<TtfEpdFont>
+// can be constructed/destroyed. (Declared in the header where it is only
+// forward-declared.)
+SdCardFontSystem::SdCardFontSystem() = default;
+SdCardFontSystem::~SdCardFontSystem() = default;
 
 namespace {
 
@@ -80,6 +107,21 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   }
 
   const char* wantedFamily = SETTINGS.sdFontFamilyName;
+
+  // Vector (.ttf/.otf) family selected: route through the FreeInkFont path and
+  // drop any pre-rasterized (.cpfont) font that was loaded.
+  if (wantedFamily[0] != '\0') {
+    const auto* wantedFam = registry_.findFamily(wantedFamily);
+    if (wantedFam && wantedFam->vector) {
+      if (!manager_.currentFamilyName().empty()) manager_.unloadAll(renderer);
+      loadTtfFamily(*wantedFam, renderer, registryWasDirty);
+      return;
+    }
+  }
+  // Not on a vector family — ensure any previously-loaded TTF font is released
+  // before the pre-rasterized/built-in path below takes over.
+  if (!ttfFamily_.empty()) unloadTtf(renderer);
+
   const std::string& currentFamily = manager_.currentFamilyName();
 
   if (wantedFamily[0] == '\0') {
@@ -176,8 +218,109 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
 }
 
 int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*pointSize*/) const {
+  // A loaded vector (.ttf) family answers first — it isn't in the .cpfont manager.
+  if (ttfFontId_ != 0 && familyName && ttfFamily_ == familyName) return ttfFontId_;
   // The manager holds exactly one reader-size font, already selected for
   // SETTINGS.fontPointSize, so the size argument is implicit — always return
   // that font's ID. ensureLoaded() must have run for the current settings first.
   return manager_.getFontId(familyName);
+}
+
+void SdCardFontSystem::unloadTtf(GfxRenderer& renderer) {
+  if (ttfFamily_.empty() && ttfFontId_ == 0 && ttfUiIds_.empty()) return;
+  // UI-size fallbacks first (they borrow ttfBytes_).
+  for (const int id : ttfUiIds_) {
+    renderer.unregisterTtfFont(id);
+    renderer.removeFont(id);
+  }
+  ttfUiIds_.clear();
+  ttfUi_.clear();
+  renderer.clearFallbackFonts();
+  if (ttfFontId_ != 0) {
+    renderer.unregisterTtfFont(ttfFontId_);
+    renderer.removeFont(ttfFontId_);  // drop from the renderer's fontMap
+  }
+  ttf_.reset();
+  ttfBytes_.clear();
+  ttfBytes_.shrink_to_fit();
+  ttfFamily_.clear();
+  ttfFontId_ = 0;
+  ttfPointSize_ = 0;
+}
+
+void SdCardFontSystem::setupTtfUiFallbacks(GfxRenderer& renderer) {
+  if (ttfBytes_.empty() || ttfFamily_.empty()) return;
+  // Small caches: UI strings (titles/rows) are short, so a modest arena keeps
+  // three extra sizes cheap. Glyphs build on demand via prewarmCache when UI
+  // text redirects here (resolveTextFontId → setFallbackFont).
+  for (const auto& ui : kUiFontSizes) {
+    auto f = std::unique_ptr<TtfEpdFont>(new TtfEpdFont());
+    if (!f->load(ttfBytes_.data(), static_cast<uint32_t>(ttfBytes_.size()), ui.pointSize,
+                 /*rasterCacheBytes=*/24 * 1024, /*glyphCacheBytes=*/24 * 1024, /*maxGlyphs=*/512)) {
+      continue;
+    }
+    const int id = computeTtfFontId(ttfFamily_.c_str(), ui.pointSize);
+    renderer.insertFont(id, f->family());
+    renderer.registerTtfFont(id, f.get());
+    renderer.setFallbackFont(ui.fontId, id);
+    ttfUiIds_.push_back(id);
+    ttfUi_.push_back(std::move(f));
+  }
+}
+
+void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRenderer& renderer,
+                                     const bool registryWasDirty) {
+  // Vector fonts render at any size; snap the reader size into the standard set.
+  snapFontPointSizeTo(snapToNearestPointSize(BUILTIN_READER_POINT_SIZES, std::size(BUILTIN_READER_POINT_SIZES),
+                                             SETTINGS.fontPointSize));
+  const uint8_t size = SETTINGS.fontPointSize;
+
+  // Already loaded, same family + size, and disk unchanged → nothing to do.
+  if (!registryWasDirty && ttf_ && ttfFamily_ == family.name && ttfPointSize_ == size) return;
+
+  unloadTtf(renderer);
+
+  if (family.files.empty()) {
+    LOG_ERR("SDFS", "Vector family %s has no file", family.name.c_str());
+    SETTINGS.clearSdFontFamily();
+    return;
+  }
+  const std::string& path = family.files.front().path;
+
+  HalFile f = Storage.open(path.c_str());
+  if (!f) {
+    LOG_ERR("SDFS", "Failed to open TTF: %s (clearing)", path.c_str());
+    SETTINGS.clearSdFontFamily();
+    return;
+  }
+  const size_t len = f.size();
+  ttfBytes_.resize(len);
+  const int got = len > 0 ? f.read(ttfBytes_.data(), len) : 0;
+  f.close();
+  if (len == 0 || static_cast<size_t>(got) != len) {
+    LOG_ERR("SDFS", "Short read on TTF %s (%d/%u)", path.c_str(), got, static_cast<unsigned>(len));
+    ttfBytes_.clear();
+    SETTINGS.clearSdFontFamily();
+    return;
+  }
+
+  ttf_.reset(new TtfEpdFont());
+  if (!ttf_->load(ttfBytes_.data(), static_cast<uint32_t>(ttfBytes_.size()), size)) {
+    LOG_ERR("SDFS", "FreeInkFont could not parse %s (clearing)", family.name.c_str());
+    ttf_.reset();
+    ttfBytes_.clear();
+    SETTINGS.clearSdFontFamily();
+    return;
+  }
+  // Seed a minimal glyph set; the reader rebuilds the real per-page set through
+  // GfxRenderer::ensureSdCardFontReady() before it measures/draws.
+  ttf_->build(" ");
+
+  ttfFontId_ = computeTtfFontId(family.name.c_str(), size);
+  renderer.insertFont(ttfFontId_, ttf_->family());
+  renderer.registerTtfFont(ttfFontId_, ttf_.get());
+  ttfFamily_ = family.name;
+  ttfPointSize_ = size;
+  setupTtfUiFallbacks(renderer);  // CJK/script UI fallback at the built-in UI sizes
+  LOG_DBG("SDFS", "Loaded TTF font: %s @ %upt (id %d)", family.name.c_str(), size, ttfFontId_);
 }

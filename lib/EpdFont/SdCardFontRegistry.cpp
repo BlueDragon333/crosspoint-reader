@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <strings.h>  // strcasecmp
 
 // --- SdCardFontFamilyInfo helpers ---
 
@@ -93,6 +94,21 @@ bool SdCardFontRegistry::parseFilename(const char* filename, uint8_t& size, uint
   // (pointSize, style) collisions in that scenario.
   style = 0;
   return true;
+}
+
+bool SdCardFontRegistry::parseVectorFontName(const char* filename, size_t& baseLen) {
+  static constexpr const char* kExts[] = {".ttf", ".otf", ".ttc"};
+  const size_t nameLen = strlen(filename);
+  for (const char* ext : kExts) {
+    const size_t extLen = strlen(ext);
+    if (nameLen <= extLen) continue;
+    const char* tail = filename + nameLen - extLen;
+    if (strcasecmp(tail, ext) == 0) {
+      baseLen = nameLen - extLen;
+      return baseLen > 0 && baseLen <= 127;
+    }
+  }
+  return false;
 }
 
 void SdCardFontRegistry::scanDirectory(const char* dirPath, SdCardFontFamilyInfo& family) {
@@ -187,7 +203,34 @@ void SdCardFontRegistry::scanRoot(const char* rootPath, std::vector<SdCardFontFa
                 static_cast<int>(out.back().files.size()), rootPath);
       }
     } else {
+      // Loose TrueType/OpenType file directly under the root (e.g.
+      // /fonts/Bookerly.ttf). Rendered at any size via the FreeInkFont engine.
+      entry.getName(nameBuffer, sizeof(nameBuffer));
       entry.close();
+      if (nameBuffer[0] == '.' || nameBuffer[0] == '_') continue;
+      size_t baseLen = 0;
+      if (!parseVectorFontName(nameBuffer, baseLen)) continue;
+
+      std::string famName(nameBuffer, baseLen);  // filename without extension
+      bool exists = false;
+      for (const auto& fam : out) {
+        if (fam.name == famName) {
+          exists = true;
+          break;
+        }
+      }
+      if (exists) continue;
+
+      SdCardFontFamilyInfo family;
+      family.name = famName;
+      family.vector = true;
+      SdCardFontFileInfo info;
+      info.path = std::string(rootPath) + "/" + nameBuffer;
+      info.pointSize = 0;  // size-free
+      info.style = 0;
+      family.files.push_back(std::move(info));
+      out.push_back(std::move(family));
+      LOG_DBG("SDREG", "Found vector font: %s in %s", famName.c_str(), rootPath);
     }
   }
 }

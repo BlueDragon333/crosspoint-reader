@@ -16,6 +16,11 @@ struct SdCardFontFileInfo {
 struct SdCardFontFamilyInfo {
   std::string name;  // directory name, e.g. "NotoSansCJK"
   std::vector<SdCardFontFileInfo> files;
+  // true for a loose TrueType/OpenType file (.ttf/.otf/.ttc) rendered at any
+  // size via the FreeInkFont engine (see TtfEpdFont / SdCardFontSystem). For a
+  // vector family `files` holds a single entry — the font path, pointSize 0
+  // (size-free). false = a directory of pre-rasterized .cpfont files.
+  bool vector = false;
 
   const SdCardFontFileInfo* findFile(uint8_t size, uint8_t style = 0) const;
   // Installed file closest to `pointSize` (ties → smaller). nullptr when the
@@ -55,6 +60,9 @@ class SdCardFontRegistry {
   std::vector<SdCardFontFamilyInfo> families_;  // sorted alphabetically
 
   static bool parseFilename(const char* filename, uint8_t& size, uint8_t& style);
+  // Match a loose vector font filename (.ttf/.otf/.ttc, case-insensitive) and
+  // return the length of the base name (extension stripped) in `baseLen`.
+  static bool parseVectorFontName(const char* filename, size_t& baseLen);
   static void scanDirectory(const char* dirPath, SdCardFontFamilyInfo& family);
   // Scan one root (e.g. "/.fonts"), append families to `out`, dedup by name.
   static void scanRoot(const char* rootPath, std::vector<SdCardFontFamilyInfo>& out);
