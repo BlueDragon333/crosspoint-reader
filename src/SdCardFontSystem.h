@@ -1,5 +1,6 @@
 #pragma once
 
+#include <HalStorage.h>  // HalFile (kept open for streamed TTFs)
 #include <SdCardFontManager.h>
 #include <SdCardFontRegistry.h>
 
@@ -74,6 +75,8 @@ class SdCardFontSystem {
   // text (book titles, list rows, menus, status bar) in scripts the built-in
   // fonts lack renders in the chosen TTF. Mirrors setupUiFallbacks for .cpfont.
   void setupTtfUiFallbacks(GfxRenderer& renderer);
+  // FreeType stream io: reads the open ttfFile_ at an absolute offset on demand.
+  static unsigned long ttfRead(void* ctx, unsigned long offset, unsigned char* buffer, unsigned long count);
 
   SdCardFontRegistry registry_;
   SdCardFontManager manager_;
@@ -81,7 +84,12 @@ class SdCardFontSystem {
 
   // Active TTF font (at most one reader-size vector font loaded at a time).
   std::unique_ptr<TtfEpdFont> ttf_;
-  std::vector<uint8_t> ttfBytes_;   // resident font file bytes (borrowed by ttf_ + UI fallbacks)
+  // Source: SMALL fonts are read fully into ttfBytes_ (resident, fast); LARGE
+  // fonts stream from ttfFile_ (kept open) so the multi-MB file never sits in RAM.
+  std::vector<uint8_t> ttfBytes_;
+  HalFile ttfFile_;                 // open handle for the streamed path
+  bool ttfStreamed_ = false;
+  unsigned long ttfFileSize_ = 0;
   std::string ttfFamily_;           // loaded vector family name ("" = none)
   int ttfFontId_ = 0;               // renderer font id for ttf_ (0 = none)
   uint8_t ttfPointSize_ = 0;        // size ttf_ was built at
