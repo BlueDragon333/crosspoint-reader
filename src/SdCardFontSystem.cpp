@@ -256,7 +256,7 @@ void SdCardFontSystem::setupTtfUiFallbacks(GfxRenderer& renderer) {
   for (const auto& ui : kUiFontSizes) {
     auto f = std::unique_ptr<TtfEpdFont>(new TtfEpdFont());
     if (!f->load(ttfBytes_.data(), static_cast<uint32_t>(ttfBytes_.size()), ui.pointSize, /*twoBit=*/true,
-                 /*rasterCacheBytes=*/24 * 1024, /*glyphCacheBytes=*/24 * 1024, /*maxGlyphs=*/512)) {
+                 /*glyphCacheBytes=*/24 * 1024, /*maxGlyphs=*/512)) {
       continue;
     }
     // Distinct id from the reader-size font: a UI size can equal the reader size
