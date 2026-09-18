@@ -226,14 +226,13 @@ void LibraryListActivity::activateIndex(const int index) {
 }
 
 // Row long-press prompts delete wherever grouping does not own the gesture:
-// the Recent sort has no groups, and an active search is already a flat list
-// the reader narrowed down on purpose ("find it, hold it, delete it").
-// Unfiltered Title/Author lists keep collapse-to-groups. Pinned rows are the
-// exception: holding one opens the row options menu instead.
+// an active search is already a flat list the reader narrowed down on purpose
+// ("find it, hold it, delete it"). Unfiltered Title/Author lists keep
+// collapse-to-groups. The Recent shelf always opens the row options menu.
 bool LibraryListActivity::deleteEligible() const { return !groupsCollapsed && (!query.empty() || !groupable()); }
 
 void LibraryListActivity::onRowLongPress(const int index) {
-  if (index < pinnedCount()) {
+  if (isRecentSort(sortOrder)) {
     showRecentBookOptions(index);
   } else if (deleteEligible()) {
     promptDeleteBook(index);
@@ -244,36 +243,63 @@ void LibraryListActivity::onRowLongPress(const int index) {
   }
 }
 
-// Recent-row long-press menu (button hold and touch long-press). Delete lives
-// here too, so the gesture works on every shelf the menu reaches; Rebuild
-// gives button-only boards the touch header's refresh action.
+// Recent-shelf long-press menu (button hold and touch long-press). The first
+// rows may come from RecentBooksStore; the rest are index rows sorted by
+// modification time. Only store rows can be removed from recents.
 void LibraryListActivity::showRecentBookOptions(const int entry) {
-  const auto& books = RECENT_BOOKS.getBooks();
-  if (entry < 0 || entry >= static_cast<int>(books.size())) return;
-  const std::string path = books[static_cast<size_t>(entry)].path;
-  const std::string title = books[static_cast<size_t>(entry)].title;
+  if (entry < 0 || entry >= listCount()) return;
 
-  const char* OPTION_LABELS[] = {tr(STR_OPEN), tr(STR_REMOVE_FROM_RECENTS), tr(STR_DELETE), tr(STR_LIBRARY_REBUILD)};
-  app.clearTapFlash();
-  optionPopup.show(tr(STR_LIBRARY), title.c_str(), OPTION_LABELS, 4, 0, [this, path, title](const int choice) {
-    swallowHeldReleases();
-    switch (choice) {
-      case 0:
-        openBookByPath(path);
-        break;
-      case 1:
-        promptRemoveRecentBook(path, title);
-        break;
-      case 2:
-        promptDeleteBookByPath(path, title);
-        break;
-      case 3:
-        promptRebuildIndex();
-        break;
-      default:
-        break;
+  std::string path;
+  std::string title;
+  const bool isStoreRow = entry < pinnedCount();
+  if (isStoreRow) {
+    const auto& books = RECENT_BOOKS.getBooks();
+    if (entry >= static_cast<int>(books.size())) return;
+    path = books[static_cast<size_t>(entry)].path;
+    title = books[static_cast<size_t>(entry)].title;
+  } else {
+    if (!index.isOpen()) return;
+    const uint16_t ordinal = index.ordinalForRow(sortOrder, static_cast<uint16_t>(rowFor(entry)));
+    library::ClixRecord record{};
+    std::string author;
+    if (ordinal == 0xFFFF || !index.readRecord(ordinal, record) || !index.readPath(record, path) ||
+        !rowTextFor(entry, title, author)) {
+      LOG_ERR("LIB", "cannot resolve Recent row %d", entry);
+      return;
     }
-  });
+  }
+
+  const char* STORE_OPTIONS[] = {tr(STR_OPEN), tr(STR_REMOVE_FROM_RECENTS), tr(STR_DELETE), tr(STR_LIBRARY_REBUILD)};
+  const char* INDEX_OPTIONS[] = {tr(STR_OPEN), tr(STR_DELETE), tr(STR_LIBRARY_REBUILD)};
+  app.clearTapFlash();
+  optionPopup.show(tr(STR_LIBRARY), title.c_str(), isStoreRow ? STORE_OPTIONS : INDEX_OPTIONS, isStoreRow ? 4 : 3, 0,
+                   [this, path, title, isStoreRow](const int choice) {
+                     swallowHeldReleases();
+                     switch (choice) {
+                       case 0:
+                         openBookByPath(path);
+                         break;
+                       case 1:
+                         if (isStoreRow) {
+                           promptRemoveRecentBook(path, title);
+                         } else {
+                           promptDeleteBookByPath(path, title);
+                         }
+                         break;
+                       case 2:
+                         if (isStoreRow)
+                           promptDeleteBookByPath(path, title);
+                         else
+                           promptRebuildIndex();
+                         break;
+                       case 3:
+                         if (isStoreRow) promptRebuildIndex();
+                         break;
+                       default:
+                         break;
+                     }
+                   });
+  requestUpdate();
 }
 
 // Manual index refresh, same card discipline as the onEnter rebuild: the walk
@@ -685,7 +711,7 @@ bool LibraryListActivity::handleButtons() {
   if (mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, LONG_PRESS_MS)) {
     if (tabsFocused()) {
       if (!degraded) toggleSortDirection();
-    } else if (selectedEntry() < pinnedCount()) {
+    } else if (isRecentSort(sortOrder)) {
       showRecentBookOptions(selectedEntry());
     } else if (deleteEligible()) {
       if (count > 0) promptDeleteBook(selectedEntry());
@@ -885,14 +911,14 @@ void LibraryListActivity::buildHeader(UiScreen& screen) {
   header.trailingStyles = fui::plainStyles(fui::Paint::solid(fui::Color::Black));
   header.borderEdges = fui::EdgeBottom;
   if (!degraded) {
-    // Touch-only rebuild action beside search (leading slot); button boards
-    // reach the same action through the row options menu.
-    if (mappedInput.hasTouch()) {
-      header.leadingIcon = fui::bitmapFromIcon(icon_refresh_cw_32);
-      header.leadingAction = ACTION_REBUILD;
-    }
+    // Keep both touch actions together on the right; button boards reach
+    // rebuild through the row options menu.
     header.trailingIcon = fui::bitmapFromIcon(icon_search_32);
     header.trailingAction = ACTION_SEARCH;
+    if (mappedInput.hasTouch()) {
+      header.trailingAdjacentIcon = fui::bitmapFromIcon(icon_refresh_cw_32);
+      header.trailingAdjacentAction = ACTION_REBUILD;
+    }
     const int titleFontId = uiScaleSpec().titleFontId;
     header.actionOffsetY =
         static_cast<int16_t>((renderer.getLineHeight(titleFontId) - renderer.getTextHeight(titleFontId)) / 2);
